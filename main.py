@@ -1,3 +1,5 @@
+
+
 # File: main.py
 # Description: An advanced multi-tool agent for ServiceNow.
 # (MODIFIED: Swapped to a Llama 3.1 model that supports tool calling)
@@ -6,11 +8,13 @@ import uvicorn
 import os
 import requests
 from dotenv import load_dotenv
-from typing import Type, List
+from typing import Type, List, Optional
 from pydantic import BaseModel, Field
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 # --- LangChain Imports ---
 from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
@@ -43,6 +47,8 @@ def get_sys_id(instance, user, pwd, table, query_field, query_value):
     return None
 
 # --- 3. ServiceNow Custom Tool Definitions ---
+
+# --- EXISTING TOOLS (UNCHANGED) ---
 class GetIncidentInput(BaseModel):
     incident_number: str = Field(description="The full incident number, e.g., 'INC0010001'.")
 class GetIncidentTool(BaseTool):
@@ -223,17 +229,190 @@ class SearchKnowledgeBaseTool(BaseTool):
         except Exception as e: return f"An error occurred while searching the knowledge base: {e}"
     def _arun(self, search_term: str): raise NotImplementedError()
 
+class DeleteIncidentInput(BaseModel):
+    incident_number: str = Field(description="The incident number to delete, e.g., 'INC0010001'.")
+class DeleteIncidentTool(BaseTool):
+    name: str = "delete_incident"
+    description: str = "Use this tool to permanently delete an incident record. WARNING: This action cannot be undone."
+    args_schema: Type[BaseModel] = DeleteIncidentInput
+    def _run(self, incident_number: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
+        if not incident_sys_id: return f"Could not find incident {incident_number} to delete."
+        url = f"{instance}/api/now/table/incident/{incident_sys_id}"
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.delete(url, auth=(user, pwd), headers=headers)
+            response.raise_for_status()
+            return f"Successfully deleted incident {incident_number}."
+        except requests.exceptions.HTTPError as err:
+            if response.status_code == 404:
+                return f"Could not find incident {incident_number} to delete."
+            return f"An HTTP error occurred: {err}"
+        except Exception as e:
+            return f"An unexpected error occurred: {e}"
+    def _arun(self, incident_number: str): raise NotImplementedError()
+
+class ListAllOpenIncidentsTool(BaseTool):
+    name: str = "list_all_open_incidents"
+    description: str = "Use this tool to get a list of all currently open incidents in the system."
+    def _run(self, *args, **kwargs):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        url = f"{instance}/api/now/table/incident"
+        params = {"sysparm_query": "active=true", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state,assignment_group"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return "There are no open incidents at this time."
+            formatted_results = ["All open incidents:"]
+            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (Group: {item.get('assignment_group').get('display_value', 'N/A')})")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred: {e}"
+    def _arun(self): raise NotImplementedError()
+
+class ListIncidentsByGroupInput(BaseModel):
+    group_name: str = Field(description="The full name of the assignment group, e.g., 'Hardware'.")
+class ListIncidentsByGroupTool(BaseTool):
+    name: str = "list_incidents_by_assignment_group"
+    description: str = "Use this tool to find all incidents (open or closed) assigned to a specific group."
+    args_schema: Type[BaseModel] = ListIncidentsByGroupInput
+    def _run(self, group_name: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
+        if not group_sys_id: return f"Could not find an assignment group named '{group_name}'."
+        url = f"{instance}/api/now/table/incident"
+        params = {"sysparm_query": f"assignment_group={group_sys_id}", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return f"No incidents are currently assigned to {group_name}."
+            formatted_results = [f"Incidents assigned to {group_name}:"]
+            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred: {e}"
+    def _arun(self, group_name: str): raise NotImplementedError()
+
+# --- ADDED: NEW TOOL - Get Aggregate Count of Incidents ---
+class GetIncidentCountByStateInput(BaseModel):
+    state: str = Field(description="The state to filter incidents by, e.g., 'New', 'In Progress', 'Resolved', 'Closed'.")
+class GetIncidentCountByStateTool(BaseTool):
+    name: str = "get_incident_count_by_state"
+    description: str = "Use this tool to get a count of all incidents that are in a specific state."
+    args_schema: Type[BaseModel] = GetIncidentCountByStateInput
+    def _run(self, state: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        url = f"{instance}/api/now/stats/incident"
+        params = {"sysparm_query": f"state={state}"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            result = response.json().get("result", {})
+            count = result.get('stats', {}).get('count', 0)
+            return f"There are {count} incidents in the '{state}' state."
+        except Exception as e:
+            return f"An error occurred while getting the incident count: {e}"
+    def _arun(self, state: str): raise NotImplementedError()
+
+# --- ADDED: NEW TOOL - Add Attachment to an Incident ---
+class AddAttachmentToIncidentInput(BaseModel):
+    incident_number: str = Field(description="The incident number to add the attachment to, e.g., 'INC0010001'.")
+    file_name: str = Field(description="The name of the file to attach.")
+    file_content: str = Field(description="The base64 encoded string of the file content.")
+class AddAttachmentToIncidentTool(BaseTool):
+    name: str = "add_attachment_to_incident"
+    description: str = "Use this tool to add an attachment to an existing incident record."
+    args_schema: Type[BaseModel] = AddAttachmentToIncidentInput
+    def _run(self, incident_number: str, file_name: str, file_content: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
+        if not incident_sys_id: return f"Could not find incident {incident_number} to add an attachment to."
+        url = f"{instance}/api/now/attachment/file?table_name=incident&table_sys_id={incident_sys_id}&file_name={file_name}"
+        headers = {"Content-Type": "application/octet-stream", "Accept": "application/json"}
+        try:
+            # Note: The `file_content` is expected to be a base64 encoded string.
+            # requests.post can handle binary data directly.
+            response = requests.post(url, auth=(user, pwd), headers=headers, data=file_content)
+            response.raise_for_status()
+            return f"Successfully added attachment '{file_name}' to incident {incident_number}."
+        except Exception as e:
+            return f"An error occurred while adding the attachment: {e}"
+    def _arun(self, incident_number: str, file_name: str, file_content: str): raise NotImplementedError()
+
+# --- ADDED: NEW TOOL - Create a New Incident via Import Set ---
+class CreateBulkIncidentsInput(BaseModel):
+    short_description: str = Field(description="A brief summary for the new incidents. Multiple incidents will be created with this description.")
+    number_of_incidents: int = Field(description="The number of incidents to create in a single bulk operation.")
+class CreateBulkIncidentsTool(BaseTool):
+    name: str = "create_bulk_incidents"
+    description: str = "Use this tool to create multiple new incidents at once via an Import Set. This is efficient for bulk creation."
+    args_schema: Type[BaseModel] = CreateBulkIncidentsInput
+    def _run(self, short_description: str, number_of_incidents: int):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        # This assumes you have a pre-configured Import Set table and Transform Map.
+        # You need to replace 'x_import_incident' with your actual import set table name.
+        import_set_table = "x_import_incident" 
+        url = f"{instance}/api/now/import/{import_set_table}"
+        
+        caller_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", "Abel Tuter")
+        if not caller_sys_id: return "Could not find the default caller 'Abel Tuter' for bulk creation."
+
+        records = []
+        for _ in range(number_of_incidents):
+            records.append({
+                "short_description": short_description,
+                "caller_id": caller_sys_id,
+                "urgency": "3",
+                "impact": "3"
+            })
+        
+        payload = {"records": records}
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+
+        try:
+            response = requests.post(url, auth=(user, pwd), headers=headers, json=payload)
+            response.raise_for_status()
+            
+            # The Import Set API returns a response about the import, not the final incidents.
+            result = response.json().get("result", {})
+            import_set_number = result.get('import_set', 'N/A')
+            return f"Successfully submitted {number_of_incidents} records to import set {import_set_number}. The incidents are being created."
+        except Exception as e:
+            return f"An error occurred while creating bulk incidents: {e}"
+    def _arun(self, short_description: str, number_of_incidents: int): raise NotImplementedError()
+
 # --- 4. LangChain Agent Setup ---
 # --- MODIFIED: Swapped to a model that supports tool calling ---
 llm = ChatNVIDIA(model="meta/llama-3.1-405b-instruct")
 
+# --- MODIFIED: Added the new tools to the list ---
 tools = [
-    GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
-    ListOpenIncidentsForUserTool(), ListIncidentsAssignedToUserTool(),
+    GetIncidentTool(),
+    SearchIncidentsTool(),
+    CreateIncidentTool(),
+    UpdateIncidentTool(),
+    ListOpenIncidentsForUserTool(),
+    ListIncidentsAssignedToUserTool(),
     SearchKnowledgeBaseTool(),
+    DeleteIncidentTool(),
+    ListAllOpenIncidentsTool(),
+    ListIncidentsByGroupTool(),
+    GetIncidentCountByStateTool(),
+    AddAttachmentToIncidentTool(),
+    CreateBulkIncidentsTool(),
 ]
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful ServiceNow assistant. You have access to tools for incidents and the knowledge base. Always be friendly and conversational."),
+    ("system", "You are a helpful ServiceNow assistant. You have access to tools for incidents and the knowledge base. Always be friendly and conversational.When the user refers to 'it' or 'that', assume they are referring to the most recently mentioned incident number. Always use the full, specific incident number when calling a tool."),
     MessagesPlaceholder(variable_name="chat_history", optional=True),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
@@ -261,9 +440,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def read_index():
+    # This serves your index.html file at the root path
+    return FileResponse('index.html')
+
+app.mount("/static", StaticFiles(directory=".", html=True), name="static")
+
 class ChatRequest(BaseModel):
     message: str
     session_id: str = "default-session"
+    file_content: Optional[str] = None
+    file_name: Optional[str] = None
 
 @app.post("/chat")
 def handle_chat_request(request: ChatRequest):
@@ -275,9 +464,19 @@ def handle_chat_request(request: ChatRequest):
     memory = chat_histories[session_id]
     chat_history = memory.load_memory_variables({})['chat_history']
     print(f"Received message: '{request.message}' for session: {session_id}")
+    if request.file_content and request.file_name:
+        # You'll need to modify your agent to handle this.
+        # For example, you can create a new tool to handle attachments.
+        # The agent's prompt would need to be updated to recognize this.
+        
+        # As a temporary placeholder, let's just acknowledge the file
+        print(f"Attachment received: {request.file_name}")
+
     response = agent_executor.invoke({
         "input": request.message,
-        "chat_history": chat_history
+        "chat_history": chat_history,
+        "file_content": request.file_content,
+        "file_name": request.file_name,
     })
     memory.save_context(
         {"input": request.message},

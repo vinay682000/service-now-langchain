@@ -2,7 +2,7 @@ pip install langchain-nvidia-ai-endpoints
 
 n> python -m uvicorn main:app --reload
 
-
+pip install langchain requests uvicorn dotenv fastapi langchain_nvidia_ai_endpoints
 
 Of course. Here is a comprehensive list of prompts designed to test the full range of our agent's capabilities, from simple commands to complex, multi-step conversations.
 
@@ -96,3 +96,16 @@ This is the most important test. Try this exact sequence of prompts:
 5.  **Follow-up 3:** `"Can you search for any other tickets related to 'email'?"` (Tests if it can switch from a specific task to a general one).
 
 Running through these prompts will give you a very clear picture of the agent's intelligence, its ability to use its tools, and its capacity to hold a natural conversation.
+
+_____
+
+Endpoints involved in the code :
+1.GetIncidentInput - Use this tool to get details for a specific incident ticket.
+2. SearchIncidentsInput - Keyword or phrase to search for in incident short descriptions.
+3. CreateIncidentInput - A brief summary of the issue for the new incident.
+4. UpdateIncidentInput - Use this tool to add a work note or comment to an existing incident.
+5. ListOpenIncidentsForUserInput - use this tool to list all OPEN incidents reported by a specific user (caller).
+6. ListIncidentsAssignedToUserInput - Use this tool to find all incidents (open or closed) assigned to a specific user.
+
+7. SearchKnowledgeBaseInput - Use this tool to search for helpful articles in the ServiceNow knowledge base.
+8. 
