@@ -109,3 +109,25 @@ Endpoints involved in the code :
 
 7. SearchKnowledgeBaseInput - Use this tool to search for helpful articles in the ServiceNow knowledge base.
 8. 
+
+
+
+Requirements
+
+what are the todays priority 2 tickets?
+what is the resolution for xyz ticket ?
+number of opened tickets count ?
+number of closed tickets count ?
+
+when i asked some x month or weeks or days report , then the monthly report should contain a bar graph(two bars - one is green(resolved) and other is red (created tickets) )
+along with the report we need an excel sheet that includes all of those tickets details 
+
+example 6 months, 10 days, from x to y days, 3 weeks etc 
+
+
+
+-- need to make three different files python files
+1. tools
+2. main.py
+3. LLM code - so that i can change the code for azure openAI or llama or gemini etc exc
+
