@@ -58,7 +58,8 @@ messageForm.addEventListener('submit', async (event) => {
         addMessage(botResponse, 'bot');
     } catch (error) {
         console.error("Error fetching bot response:", error);
-        addMessage("Sorry, I'm having trouble connecting to the server. Please try again later.", 'bot');
+        // addMessage("Sorry, I'm having trouble connecting to the server. Please try again later.", 'bot');
+        addMessage(error.message, 'bot');
     } finally {
         sendButton.disabled = false;
     }
@@ -115,7 +116,6 @@ async function getBotResponse(userMessage, fileContent = null, fileName = null) 
             session_id: sessionId,
         };
 
-        // Conditionally add file data to the payload if it exists
         if (fileContent && fileName) {
             payload.file_content = fileContent;
             payload.file_name = fileName;
@@ -129,8 +129,11 @@ async function getBotResponse(userMessage, fileContent = null, fileName = null) 
             body: JSON.stringify(payload),
         });
 
+        // The key change is here: check for a successful response.
         if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
+            const errorData = await response.json();
+            // Throw a new error with the specific message from the backend.
+            throw new Error(errorData.reply); 
         }
 
         const data = await response.json();

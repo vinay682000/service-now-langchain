@@ -21,6 +21,7 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools import BaseTool
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferWindowMemory
+from langchain_core.agents import AgentFinish
 
 # --- 1. Load Environment Variables ---
 load_dotenv()
@@ -226,6 +227,33 @@ class SearchKnowledgeBaseTool(BaseTool):
         except Exception as e: return f"An error occurred while searching the knowledge base: {e}"
     def _arun(self, search_term: str): raise NotImplementedError()
 
+class DeleteIncidentInput(BaseModel):
+    incident_number: str = Field(description="The incident number to delete, e.g., 'INC0010001'.")
+
+class DeleteIncidentTool(BaseTool):
+    name: str = "delete_incident"
+    description: str = "Use this tool to permanently delete an incident record. WARNING: This action cannot be undone."
+    args_schema: Type[BaseModel] = DeleteIncidentInput
+    def _run(self, incident_number: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
+        if not incident_sys_id: return f"Could not find incident {incident_number} to delete."
+        url = f"{instance}/api/now/table/incident/{incident_sys_id}"
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.delete(url, auth=(user, pwd), headers=headers)
+            response.raise_for_status()
+            # Explicitly return the success message here
+            return f"Successfully deleted incident {incident_number}." 
+        except requests.exceptions.HTTPError as err:
+            if response.status_code == 404:
+                return f"Could not find incident {incident_number} to delete."
+            return f"An HTTP error occurred: {err}"
+        except Exception as e:
+            return f"An unexpected error occurred: {e}"
+    def _arun(self, incident_number: str): raise NotImplementedError()
+
 # --- 4. LangChain Agent Setup ---
 # --- MODIFIED: Swapped to a model that supports tool calling ---
 llm = ChatNVIDIA(model="meta/llama-3.1-405b-instruct")
@@ -233,7 +261,7 @@ llm = ChatNVIDIA(model="meta/llama-3.1-405b-instruct")
 tools = [
     GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
     ListOpenIncidentsForUserTool(), ListIncidentsAssignedToUserTool(),
-    SearchKnowledgeBaseTool(),
+    SearchKnowledgeBaseTool(), DeleteIncidentTool(),
 ]
 prompt = ChatPromptTemplate.from_messages([
     ("system", "You are a helpful ServiceNow assistant. You have access to tools for incidents and the knowledge base. Always be friendly and conversational."),
