@@ -461,6 +461,8 @@ app = FastAPI(
     description="An API for interacting with a multi-tool ServiceNow agent with memory.",
     version="3.1.0",
 )
+
+# Add CORS middleware to allow cross-origin requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -469,12 +471,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def read_index():
-    # This serves your index.html file at the root path
-    return FileResponse('index.html')
-
-app.mount("/static", StaticFiles(directory=".", html=True), name="static")
 
 class ChatRequest(BaseModel):
     message: str
@@ -484,41 +480,32 @@ class ChatRequest(BaseModel):
 def handle_chat_request(request: ChatRequest):
     session_id = request.session_id
     if session_id not in chat_histories:
-        chat_histories[session_id] = ConversationBufferWindowMemory(
-            k=10, memory_key="chat_history", return_messages=True
-        )
+        chat_histories[session_id] = {}
     memory = chat_histories[session_id]
-    chat_history = memory.load_memory_variables({})['chat_history']
-    print(f"Received message: '{request.message}' for session: {session_id}")
+    chat_history = memory.get("messages", [])
 
-    # The key change is wrapping the logic in a try-except block
     try:
         response = agent_executor.invoke({
             "input": request.message,
             "chat_history": chat_history
         })
-        
-        # Save context to memory after successful invocation
-        memory.save_context(
-            {"input": request.message},
-            {"output": response['output']}
-        )
-        print(f"Agent output: {response['output']}")
-        
-        # Return a JSONResponse with a 200 OK status
         return JSONResponse(content={"reply": response['output']})
-    
     except Exception as e:
-        print(f"An unexpected error occurred during agent execution: {e}")
-        # Return a 500 Internal Server Error with the specific error message
         return JSONResponse(
-            content={"reply": f"An unexpected error occurred: {str(e)}"},
+            content={"reply": f"Unexpected error: {str(e)}"},
             status_code=500
         )
 
-@app.get("/")
-def read_root():
-    return {"status": "ServiceNow Chatbot API is running"}
+
+
+#@app.get("/")
+#def read_root():
+#    return {"status": "ServiceNow Chatbot API is running"}
+
+
+# Mount the new React build directory.
+# This should be the only mount point for your static files.
+app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
