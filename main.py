@@ -6,15 +6,17 @@
 import uvicorn
 import os
 import requests
+import pandas as pd 
 from dotenv import load_dotenv
 from typing import Type, List, Optional
 from pydantic import BaseModel, Field
-
-from datetime import datetime
-from fastapi import FastAPI
+from io import BytesIO
+from datetime import datetime, timedelta
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from typing import Optional
 
 # --- LangChain Imports ---
 from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
@@ -476,7 +478,7 @@ class ChatRequest(BaseModel):
     message: str
     session_id: str = "default-session"
 
-@app.post("/chat")
+@app.post("/api/chat")
 def handle_chat_request(request: ChatRequest):
     session_id = request.session_id
     if session_id not in chat_histories:
@@ -496,15 +498,6 @@ def handle_chat_request(request: ChatRequest):
             status_code=500
         )
 
-
-
-#@app.get("/")
-#def read_root():
-#    return {"status": "ServiceNow Chatbot API is running"}
-
-
-# Mount the new React build directory.
-# This should be the only mount point for your static files.
 app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 if __name__ == "__main__":

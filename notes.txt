@@ -1,6 +1,8 @@
 pip install langchain-nvidia-ai-endpoints
 
 n> python -m uvicorn main:app --reload
+cd frontend
+npm run dev
 
 pip install langchain requests uvicorn dotenv fastapi langchain_nvidia_ai_endpoints
 

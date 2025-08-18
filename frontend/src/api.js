@@ -1,7 +1,10 @@
 // frontend/src/api.js
 
 // Use current window origin (protocol + host + port)
-const BACKEND_URL = window.location.origin;
+const BACKEND_URL = "https://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev";
+
+
+
 
 // Function to get bot response
 export const getBotResponse = async (userMessage, sessionId) => {
@@ -11,13 +14,13 @@ export const getBotResponse = async (userMessage, sessionId) => {
   };
 
   try {
-    const response = await fetch(`${BACKEND_URL}/chat`, {
+    const response = await fetch(`${BACKEND_URL}/api/chat`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
-      credentials: 'include',  // include cookies if backend requires auth
+      //credentials: 'same-origin',  // include cookies if backend requires auth
     });
 
     if (!response.ok) {
