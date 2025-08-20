@@ -7,27 +7,42 @@ import uvicorn
 import os
 import requests
 import pandas as pd 
-from dotenv import load_dotenv
-from typing import Type, List, Optional
-from pydantic import BaseModel, Field
-from io import BytesIO
+import aiohttp
+import asyncio
+import concurrent.futures
+import logging
+import time
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from typing import Optional
+from io import BytesIO
+from pydantic import BaseModel, Field, validator, ValidationError
+from typing import Type, List, Optional, Any, Dict
 
 # --- LangChain Imports ---
 from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
 from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain.tools import BaseTool
+from langchain_core.agents import AgentFinish
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.memory import ConversationBufferWindowMemory
-from langchain_core.agents import AgentFinish
+from langchain.tools import BaseTool
 
 # --- 1. Load Environment Variables ---
 load_dotenv()
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),  # Console output
+        # logging.FileHandler('app.log')  # Uncomment for file logging
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # --- 2. Helper Functions ---
 def get_servicenow_credentials():
@@ -54,61 +69,104 @@ class GetIncidentInput(BaseModel):
     incident_number: str = Field(description="The full incident number, e.g., 'INC0010001'.")
 class GetIncidentTool(BaseTool):
     name: str = "get_incident_details"
-    description: str = "Use this tool to get details for a specific incident ticket."
+    description: str = "Use this tool to get details for a specific incident ticket. The incident number must be the full number, including the 'INC' prefix."
     args_schema: Type[BaseModel] = GetIncidentInput
+    
     def _run(self, incident_number: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
+        
         url = f"{instance}/api/now/table/incident"
-        params = {"sysparm_query": f"number={incident_number}", "sysparm_limit": "1", "sysparm_fields": "number,short_description,description,state,assignment_group,caller_id"}
+        params = {
+            "sysparm_query": f"number={incident_number}", 
+            "sysparm_limit": "1", 
+            "sysparm_fields": "number,short_description,description,state,assignment_group,caller_id,sys_created_on"
+        }
         headers = {"Accept": "application/json"}
+        
         try:
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             data = response.json()
+            
             results = data.get("result", [])
-            if not isinstance(results, list) or not results: return f"No incident found with the number {incident_number}."
+            if not results: 
+                return f"No incident found with the number {incident_number}."
+            
             incident_data = results[0]
-            if not isinstance(incident_data, dict): return f"No valid incident data found for {incident_number}."
-            def get_display_value(data, key):
-                field_data = data.get(key)
-                if isinstance(field_data, dict): return field_data.get('display_value', 'N/A')
-                return 'N/A'
-            state_value = incident_data.get('state', 'N/A')
-            assignment_group = get_display_value(incident_data, 'assignment_group')
-            caller = get_display_value(incident_data, 'caller_id')
-            formatted_result = (f"Incident Details for {incident_data.get('number', 'N/A')}:\n"
-                                f"- Short Description: {incident_data.get('short_description', 'N/A')}\n"
-                                f"- State: {state_value}\n"
-                                f"- Assignment Group: {assignment_group}\n"
-                                f"- Caller: {caller}\n"
-                                f"- Full Description: {incident_data.get('description', 'N/A')}")
+            
+            # Simplified helper function for safe data access
+            def get_value(field_name, default='N/A'):
+                field_data = incident_data.get(field_name, {})
+                if isinstance(field_data, dict):
+                    return field_data.get('display_value', default)
+                return field_data or default
+            
+            # Map state numbers to human-readable text
+            state_map = {
+                '1': 'New',
+                '2': 'In Progress',
+                '3': 'On Hold',
+                '4': 'Awaiting User Info',
+                '5': 'Awaiting Problem',
+                '6': 'Resolved',
+                '7': 'Closed'
+            }
+            
+            state_display = state_map.get(str(get_value('state')), 'Unknown')
+            
+            formatted_result = (
+                f"Incident Details for {get_value('number')}:\n"
+                f"- Short Description: {get_value('short_description')}\n"
+                f"- Description: {get_value('description', 'No description provided')}\n"
+                f"- State: {state_display}\n"
+                f"- Assignment Group: {get_value('assignment_group', 'Not assigned')}\n"
+                f"- Caller: {get_value('caller_id')}\n"
+                f"- Created On: {get_value('sys_created_on')}"
+            )
             return formatted_result
-        except Exception as e: return f"An unexpected error occurred: {e}"
-    def _arun(self, incident_number: str): raise NotImplementedError()
+            
+        except requests.exceptions.HTTPError as err:
+            return f"An HTTP error occurred: {err}"
+        except Exception as e:
+            return f"An unexpected error occurred: {e}"
 
 class SearchIncidentsInput(BaseModel):
     search_term: str = Field(description="Keyword or phrase to search for in incident short descriptions.")
+
 class SearchIncidentsTool(BaseTool):
     name: str = "search_incidents"
     description: str = "Use this tool to search for incidents by a keyword. Returns a list of matching incidents."
     args_schema: Type[BaseModel] = SearchIncidentsInput
+
     def _run(self, search_term: str):
         instance, user, pwd = get_servicenow_credentials()
         if not instance: return "ServiceNow credentials not configured."
+        
         url = f"{instance}/api/now/table/incident"
         params = {"sysparm_query": f"short_descriptionLIKE{search_term}", "sysparm_limit": "5", "sysparm_fields": "number,short_description"}
         headers = {"Accept": "application/json"}
+        
         try:
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
+            
             if not results: return f"No incidents found matching '{search_term}'."
+            
             formatted_results = ["Found incidents:"]
-            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')}")
+            for item in results: 
+                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')}")
             return "\n".join(formatted_results)
-        except Exception as e: return f"An error occurred during search: {e}"
-    def _arun(self, search_term: str): raise NotImplementedError()
+            
+        except Exception as e: 
+            return f"An error occurred during search: {e}"
+
+    def _arun(self, search_term: str): 
+        raise NotImplementedError()
+
+
 
 class CreateIncidentInput(BaseModel):
     short_description: str = Field(description="A brief summary of the issue for the new incident.")
@@ -205,35 +263,107 @@ class ListIncidentsAssignedToUserTool(BaseTool):
     def _arun(self, user_name: str): raise NotImplementedError()
 
 class SearchKnowledgeBaseInput(BaseModel):
-    search_term: str = Field(description="The topic or question to search for in the knowledge base.")
+    search_term: str = Field(
+        description="The keyword or phrase to search for in the knowledge base."
+    )
+    search_field: Optional[str] = Field(
+        default="short_description",
+        description="The specific field to search within. Can be 'short_description', 'article_body', or another valid field name. Defaults to 'short_description'."
+    )
+    search_limit: Optional[int] = Field(
+        default=3,
+        description="The maximum number of articles to return. Defaults to 3."
+    )
+    category: Optional[str] = Field(
+        default=None,
+        description="An optional category name to filter the search results. Use this for more precise searches, e.g., 'IT', 'HR', etc."
+    )
+
 class SearchKnowledgeBaseTool(BaseTool):
     name: str = "search_knowledge_base"
-    description: str = "Use this tool to search for helpful articles in the ServiceNow knowledge base."
+    description: str = "Searches the ServiceNow knowledge base for articles. Use this tool for technical questions, how-tos, or any information about internal processes. " \
+                        "The search is flexible and can be refined by a specific field or category. " \
+                        "Example: search_knowledge_base(search_term='troubleshoot printer', search_field='article_body') " \
+                        "or search_knowledge_base(search_term='onboarding guide', category='HR')"
     args_schema: Type[BaseModel] = SearchKnowledgeBaseInput
-    def _run(self, search_term: str):
+
+    def _run(self, 
+             search_term: str, 
+             search_field: str = "short_description", 
+             search_limit: int = 3, 
+             category: Optional[str] = None):
+        
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
-        url = f"{instance}/api/now/table/kb_knowledge"
-        params = {"sysparm_query": f"short_descriptionLIKE{search_term}", "sysparm_limit": "3", "sysparm_fields": "number,short_description,article_body"}
+        if not all([instance, user, pwd]):
+            return "ServiceNow credentials not configured. Please check the 'get_servicenow_credentials' function."
+        
+        # This is where the correction is made.
+        # Ensure search_field is set to a default if the agent sends None
+        if not search_field:
+            search_field = "short_description"
+        
+        # Build the sysparm_query parameter.
+        query_parts = [f"{search_field}LIKE{search_term}"]
+        if category:
+            query_parts.append(f"^categoryLIKE{category}")
+            
+        # Construct the params dictionary *before* printing or using it.
+        params = {
+            "sysparm_query": "".join(query_parts),
+            "sysparm_limit": str(search_limit),
+            "sysparm_fields": "number,short_description,article_body,sys_id,sys_view_count"
+        }
+
+        # Now you can safely use the url and params variables.
+        # Note: the URL construction is now correctly handled without a double slash
+        # by using .rstrip('/') on the instance variable, just to be safe.
+        url = f"{instance.rstrip('/')}/api/now/table/kb_knowledge"
+        
+        print(f"Constructed URL: {url}")
+        print(f"Constructed Params: {params}")
+
         headers = {"Accept": "application/json"}
+        
         try:
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
-            if not results: return f"No knowledge base articles found matching '{search_term}'."
+            
+            if not results:
+                return f"No knowledge base articles found matching '{search_term}'."
+            
             formatted_results = ["Found knowledge base articles:"]
             for item in results:
-                body = item.get('article_body', 'No content.')
-                #clean_body = requests.utils.unquote(body).replace('</p>', '\n').replace('<p>', '').replace('<strong>', '').replace('</strong>', '')
-                clean_body = body.replace('</p>', ' ').replace('<p>', ' ').replace('<strong>', '').replace('</strong>', '').strip()
-                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')}\n  Summary: {clean_body[:150]}...")
-            return "\n".join(formatted_results)
-        except Exception as e: return f"An error occurred while searching the knowledge base: {e}"
-    def _arun(self, search_term: str): raise NotImplementedError()
+                title = item.get('short_description', 'No Title')
+                body_html = item.get('article_body', '')
+                
+                clean_body = body_html.replace('</p>', ' ').replace('<p>', ' ').replace('<strong>', '').replace('</strong>', '').strip()
+                
+                if not clean_body or len(clean_body) < 10:
+                    summary = "No detailed content available."
+                else:
+                    summary = clean_body[:250].strip() + ("..." if len(clean_body) > 250 else "")
+                    
+                formatted_results.append(
+                    f"- {item.get('number')}: {title}\n"
+                    f"  Link: {instance}/kb_view.do?sys_kb_id={item.get('sys_id')}\n"
+                    f"  Summary: {summary}"
+                )
+            
+            return "\n\n".join(formatted_results)
+            
+        except requests.exceptions.RequestException as e:
+            return f"An HTTP error occurred: {e}"
+        except Exception as e:
+            return f"An unexpected error occurred: {e}"
+
+    def _arun(self, **kwargs):
+        """Asynchronous run is not implemented for this tool."""
+        raise NotImplementedError()
+
 
 class DeleteIncidentInput(BaseModel):
     incident_number: str = Field(description="The incident number to delete, e.g., 'INC0010001'.")
-
 class DeleteIncidentTool(BaseTool):
     name: str = "delete_incident"
     description: str = "Use this tool to permanently delete an incident record. WARNING: This action cannot be undone."
@@ -295,6 +425,17 @@ class AssignIncidentTool(BaseTool):
     def _run(self, incident_number: str, assign_to_user: Optional[str] = None, assign_to_group: Optional[str] = None):
         instance, user, pwd = get_servicenow_credentials()
         if not instance: return "ServiceNow credentials not configured."
+         # Handle null values from LLM
+        if assign_to_user == "null":
+            assign_to_user = None
+        if assign_to_group == "null": 
+            assign_to_group = None
+         # Validation
+        if not assign_to_user and not assign_to_group:
+            return "Please specify either a user or a group to assign the incident to."
+        if assign_to_user and assign_to_group:
+            return "Please provide either a user or a group, not both."
+
         incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
         if not incident_sys_id: return f"Could not find incident {incident_number} to assign."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
@@ -430,6 +571,79 @@ class ListIncidentsForGroupTool(BaseTool):
     def _arun(self, group_name: str, limit: int = 10):
         raise NotImplementedError()
 
+class GetMultipleIncidentsInput(BaseModel):
+    incident_numbers: List[str] = Field(description="List of incident numbers to fetch")
+class GetMultipleIncidentsTool(BaseTool):
+    name: str = "get_multiple_incidents"
+    description: str = "Fetch details for multiple incidents concurrently. Input should be a list of incident numbers."
+    args_schema: Type[BaseModel] = GetMultipleIncidentsInput
+
+    def _run(self, incident_numbers: List[str]):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance:
+            return "ServiceNow credentials not configured."
+
+        def fetch_single_incident(inc_num):
+            # Use the SAME API call as GetIncidentTool but with proper error handling
+            url = f"{instance}/api/now/table/incident"
+            params = {
+                "sysparm_query": f"number={inc_num}",
+                "sysparm_limit": "1",
+                "sysparm_fields": "number,short_description,description,state,assignment_group,caller_id"
+            }
+            headers = {"Accept": "application/json"}
+            
+            try:
+                response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+                response.raise_for_status()
+                data = response.json()
+                
+                # Handle empty results
+                if not data.get('result') or len(data['result']) == 0:
+                    return f"Incident {inc_num} not found"
+                
+                incident = data['result'][0]
+                
+                # SAFE field access (same as GetIncidentTool)
+                def get_display_value(field_data):
+                    if isinstance(field_data, dict):
+                        return field_data.get('display_value', 'N/A')
+                    return 'N/A'
+                
+                assignment_group = incident.get('assignment_group')
+                caller_id = incident.get('caller_id')
+                
+                # Handle empty assignment_group (string instead of dict)
+                if assignment_group == "":  # This is the bug!
+                    assignment_group_display = "Not assigned"
+                else:
+                    assignment_group_display = get_display_value(assignment_group)
+                
+                # Handle caller_id
+                caller_display = get_display_value(caller_id) if caller_id else "Unknown"
+                
+                description = incident.get('description', '')
+                if not description:
+                    description = "No description provided"
+                
+                return (
+                    f"Incident {inc_num}:\n"
+                    f"- Short Description: {incident.get('short_description', 'Not provided')}\n"
+                    f"- State: {incident.get('state', 'Unknown')}\n"
+                    f"- Assignment Group: {assignment_group_display}\n"
+                    f"- Caller: {caller_display}\n"
+                    f"- Description: {description}"
+                )
+                
+            except Exception as e:
+                return f"Error fetching incident {inc_num}: {str(e)}"
+
+        # Use ThreadPoolExecutor for concurrent requests
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            results = list(executor.map(fetch_single_incident, incident_numbers))
+            
+        return "\n\n".join(results)
+
 
 # --- 4. LangChain Agent Setup ---
 # --- MODIFIED: Swapped to a model that supports tool calling ---
@@ -439,11 +653,23 @@ tools = [
     GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
     ListOpenIncidentsForUserTool(), ListIncidentsAssignedToUserTool(),
     SearchKnowledgeBaseTool(), DeleteIncidentTool(), ResolveIncidentTool(), AssignIncidentTool(), GetIncidentMetricsTool(),
-    CountIncidentsForGroupTool(), ListIncidentsForGroupTool(),
+    CountIncidentsForGroupTool(), ListIncidentsForGroupTool(), GetMultipleIncidentsTool(),
 ]
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "You are a helpful ServiceNow assistant. You have access to tools for incidents and the knowledge base. Always be friendly and conversational."),
-    MessagesPlaceholder(variable_name="chat_history", optional=True),
+    ("system", """You are a helpful ServiceNow assistant. Follow these rules strictly:
+
+1. When user asks for multiple incidents, use get_multiple_incidents tool ONCE
+2. Present results in clean, natural language format - no JSON
+3. If tool returns good data, present it directly without extra processing
+4. Never ask follow-up questions unless user specifically asks for more
+5. Keep responses concise but informative
+6. For single incidents, use get_incident_details tool
+7. Stop after presenting the requested information
+
+Available capabilities: Get incident details, search knowledge base, create/update incidents, and more.
+
+Always be professional and focused on providing the exact information requested."""),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("human", "{input}"),
     MessagesPlaceholder(variable_name="agent_scratchpad"),
 ])
@@ -454,7 +680,11 @@ agent_executor = AgentExecutor(
     agent=agent, 
     tools=tools, 
     verbose=True,
-    handle_parsing_errors=True
+    handle_parsing_errors=True,
+    max_iterations=10,
+    early_stopping_method='force',
+    return_intermediate_steps=False,
+    max_execution_time=60
 )
 
 # --- 5. FastAPI App and Endpoint ---
@@ -464,37 +694,109 @@ app = FastAPI(
     version="3.1.0",
 )
 
+# Add GZip compression middleware
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # Compress responses > 1KB
+
 # Add CORS middleware to allow cross-origin requests
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev",
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev"
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["POST", "OPTIONS", "GET"],  # Explicitly specify needed methods
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600
 )
 
 
 class ChatRequest(BaseModel):
-    message: str
-    session_id: str = "default-session"
+    message: str = Field(..., min_length=1, max_length=1000, description="User message to process")  # Required with length limits
+    session_id: Optional[str] = Field(
+        default="default-session",
+        min_length=1,
+        max_length=50,
+        pattern=r'^[a-zA-Z0-9-_]+$',  # Only allow alphanumeric, dash, underscore
+        description="Unique session identifier for conversation history"
+    )
+
+    @validator('message')
+    def validate_message(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Message cannot be empty or whitespace only")
+        return v.strip()
+
+
+@app.options("/api/chat")
+async def options_handler():
+    return JSONResponse(
+        content={"status": "ok"},
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS, GET",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+            "Access-Control-Max-Age": "600"
+        }
+    )
 
 @app.post("/api/chat")
-def handle_chat_request(request: ChatRequest):
-    session_id = request.session_id
-    if session_id not in chat_histories:
-        chat_histories[session_id] = {}
-    memory = chat_histories[session_id]
-    chat_history = memory.get("messages", [])
-
+async def handle_chat_request(request: ChatRequest):
+    start_time = time.time()
+    logger.info(f"📨 Received request - Session: {request.session_id}, Message: '{request.message}'")
     try:
-        response = agent_executor.invoke({
-            "input": request.message,
-            "chat_history": chat_history
-        })
-        return JSONResponse(content={"reply": response['output']})
-    except Exception as e:
+        if request.session_id not in chat_histories:
+            chat_histories[request.session_id] = {"messages": []}
+            logger.info(f"🆕 New session created: {request.session_id}")
+        
+        try:
+            response = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    lambda: agent_executor.invoke({
+                        "input": request.message,
+                        "chat_history": chat_histories[request.session_id]["messages"]
+                    })
+                ),
+                timeout=80.0
+            )
+            processing_time = time.time() - start_time
+            logger.info(f"✅ Request processed in {processing_time:.2f}s - Output: '{response['output'][:100]}...'")
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ Timeout after 80s - Message: '{request.message}'")
+            return JSONResponse(
+                content={"reply": "This operation is taking longer than expected. Please try a simpler query or fewer incidents at once."},
+                status_code=408
+            )            
+        except Exception as e:
+            logger.error(f"❌ Agent execution failed: {str(e)}")
+            return JSONResponse(
+                content={"reply": "I encountered an error while processing your request. Please try again with a different query."},
+                status_code=500
+            )
+        
+        # Update chat history
+        chat_histories[request.session_id]["messages"].extend([
+            HumanMessage(content=request.message),
+            AIMessage(content=response['output'])
+        ])
+        # Prevent history from growing too large
+        if len(chat_histories[request.session_id]["messages"]) > 20:
+            chat_histories[request.session_id]["messages"] = chat_histories[request.session_id]["messages"][-10:]
+        
+        return {"reply": response['output']}
+    
+    except ValidationError as e:
+        logger.warning(f"⚠️ Validation error: {str(e)}")
         return JSONResponse(
-            content={"reply": f"Unexpected error: {str(e)}"},
+            content={"error": "Invalid request format. Please check your input."},
+            status_code=400
+        )
+    except Exception as e:
+        logger.error(f"🔥 Unexpected error: {str(e)}")
+        return JSONResponse(
+            content={"reply": "Our service is temporarily unavailable. Please try again in a moment."},
             status_code=500
         )
 

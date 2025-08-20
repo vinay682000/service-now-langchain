@@ -5,32 +5,89 @@ import ChatInput from './components/ChatInput';
 import { getBotResponse } from './api';
 
 // Generate a unique session ID
-const sessionId = localStorage.getItem('sessionId') || `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-localStorage.setItem('sessionId', sessionId);
+const getSessionId = () => {
+  const sessionId = localStorage.getItem('sessionId') || `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  localStorage.setItem('sessionId', sessionId);
+  return sessionId;
+};
 
 function App() {
-  const [messages, setMessages] = useState([
-    { sender: 'bot', text: 'Hello! I am your ServiceNow Assistant. How can I help you today?' },
-  ]);
-
+  const [messages, setMessages] = useState([]); // Start empty for better LCP
+  const [isLoading, setIsLoading] = useState(false);
+  const [isLongOperation, setIsLongOperation] = useState(false);
+  const sessionIdRef = useRef(getSessionId());
   const chatEndRef = useRef(null);
+  const longOpTimerRef = useRef(null);
+
+  // Load initial message after component mounts (LCP optimization)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setMessages([
+        { sender: 'bot', text: 'Hello! I am your ServiceNow Assistant. How can I help you today?' },
+      ]);
+    }, 100); // Small delay to improve LCP
+
+    return () => clearTimeout(timer);
+  }, []);
 
   const handleSendMessage = async (text) => {
+    setIsLoading(true);
+    setIsLongOperation(false);
+    
     const userMessage = { sender: 'user', text };
-    const thinkingMessage = { sender: 'bot', text: 'Thinking...' };
+    const thinkingMessage = { sender: 'bot', text: 'Thinking...', isThinking: true };
+    
     setMessages((prev) => [...prev, userMessage, thinkingMessage]);
 
+    // Show "taking longer" message after 15 seconds
+    longOpTimerRef.current = setTimeout(() => {
+      setIsLongOperation(true);
+      setMessages(prev => prev.map(msg => 
+        msg.isThinking ? { ...msg, text: "This is taking a bit longer than usual..." } : msg
+      ));
+    }, 15000);
+
     try {
-      const botReply = await getBotResponse(text, sessionId);
-      setMessages((prev) => prev.map((msg) => (msg === thinkingMessage ? { sender: 'bot', text: botReply } : msg)));
+      const botReply = await getBotResponse(text, sessionIdRef.current);
+      
+      // Replace thinking message with actual reply
+      setMessages((prev) => 
+        prev.map((msg) => 
+          msg.isThinking ? { sender: 'bot', text: botReply } : msg
+        )
+      );
     } catch (error) {
-      setMessages((prev) => prev.map((msg) => (msg === thinkingMessage ? { sender: 'bot', text: error.message } : msg)));
+      // Replace thinking message with error
+      setMessages((prev) => 
+        prev.map((msg) => 
+          msg.isThinking ? { sender: 'error', text: error.message } : msg
+        )
+      );
+    } finally {
+      // Clean up timers and loading states
+      clearTimeout(longOpTimerRef.current);
+      setIsLoading(false);
+      setIsLongOperation(false);
     }
   };
 
+  // Clean up on unmount
+  useEffect(() => {
+    return () => {
+      if (longOpTimerRef.current) {
+        clearTimeout(longOpTimerRef.current);
+      }
+    };
+  }, []);
+
   // Scroll to the bottom when messages update
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (messages.length > 0) {
+      chatEndRef.current?.scrollIntoView({ 
+        behavior: 'smooth',
+        block: 'nearest'
+      });
+    }
   }, [messages]);
 
   return (
@@ -39,9 +96,18 @@ function App() {
         <header className="bg-gradient-to-r from-blue-500 to-indigo-500 p-4 text-center text-white font-bold text-xl shadow-md">
           ServiceNow Assistant
         </header>
+        
+        {/* Loading skeleton for better LCP */}
+        {messages.length === 0 && (
+          <div className="p-4 animate-pulse">
+            <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
+            <div className="h-4 bg-gray-200 rounded w-1/2"></div>
+          </div>
+        )}
+        
         <ChatWindow messages={messages} />
-        <ChatInput onSendMessage={handleSendMessage} />
-        <div ref={chatEndRef} />
+        <ChatInput onSendMessage={handleSendMessage} disabled={isLoading} />
+        <div ref={chatEndRef} aria-hidden="true" />
       </div>
     </div>
   );
