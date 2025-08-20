@@ -14,7 +14,7 @@ const getSessionId = () => {
 function App() {
   const [messages, setMessages] = useState([]); // Start empty for better LCP
   const [isLoading, setIsLoading] = useState(false);
-  const [isLongOperation, setIsLongOperation] = useState(false);
+  const [setIsLongOperation] = useState(false);
   const sessionIdRef = useRef(getSessionId());
   const chatEndRef = useRef(null);
   const longOpTimerRef = useRef(null);

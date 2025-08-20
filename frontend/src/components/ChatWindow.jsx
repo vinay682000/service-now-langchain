@@ -1,5 +1,7 @@
-// frontend/src/components/ChatWindow.jsx
+// FIX 1: Ensure React is imported (it should be, but let's be explicit)
 import React from 'react';
+// FIX 2: Import PropTypes
+import PropTypes from 'prop-types';
 
 // If you prefer using dangerouslySetInnerHTML (more efficient for large texts)
 function ChatWindow({ messages }) {
@@ -47,5 +49,15 @@ function ChatWindow({ messages }) {
     </div>
   );
 }
+
+// FIX 3: Define the propTypes for the component
+ChatWindow.propTypes = {
+  messages: PropTypes.arrayOf( // 'messages' is an array...
+    PropTypes.shape({           // ...of objects with this shape
+      sender: PropTypes.string.isRequired,
+      text: PropTypes.string.isRequired,
+    })
+  ).isRequired, // ...and this array is required.
+};
 
 export default ChatWindow;

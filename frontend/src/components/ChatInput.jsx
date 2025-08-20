@@ -1,5 +1,6 @@
 // frontend/src/components/ChatInput.jsx
 import React, { useState, useRef } from 'react';
+import PropTypes from 'prop-types';
 
 function ChatInput({ onSendMessage, disabled }) {
   const [inputText, setInputText] = useState('');
@@ -16,6 +17,12 @@ function ChatInput({ onSendMessage, disabled }) {
       }
     }
   };
+
+// 2. Define propTypes outside the component
+ChatInput.propTypes = {
+  onSendMessage: PropTypes.func.isRequired, // function, required
+  disabled: PropTypes.bool,                 // boolean, optional
+};
 
   const handleKeyDown = (e) => {
     // Shift + Enter = New line

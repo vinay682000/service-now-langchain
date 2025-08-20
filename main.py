@@ -6,30 +6,25 @@
 import uvicorn
 import os
 import requests
-import pandas as pd 
-import aiohttp
 import asyncio
 import concurrent.futures
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from io import BytesIO
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, validator, ValidationError
-from typing import Type, List, Optional, Any, Dict
+from typing import Type, List, Optional
 
 # --- LangChain Imports ---
 from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
 from langchain.agents import AgentExecutor, create_openai_tools_agent
-from langchain_core.agents import AgentFinish
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.memory import ConversationBufferWindowMemory
 from langchain.tools import BaseTool
 
 # --- 1. Load Environment Variables ---
@@ -49,7 +44,8 @@ def get_servicenow_credentials():
     instance = os.getenv("SERVICENOW_INSTANCE")
     user = os.getenv("SERVICENOW_USERNAME")
     pwd = os.getenv("SERVICENOW_PASSWORD")
-    if not all([instance, user, pwd]): return None, None, None
+    if not all([instance, user, pwd]): 
+        return None, None, None
     return instance, user, pwd
 
 def get_sys_id(instance, user, pwd, table, query_field, query_value):
@@ -60,8 +56,10 @@ def get_sys_id(instance, user, pwd, table, query_field, query_value):
         response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
         response.raise_for_status()
         results = response.json().get("result", [])
-        if results: return results[0]['sys_id']
-    except Exception as e: print(f"Error getting sys_id: {e}")
+        if results: 
+            return results[0]['sys_id']
+    except Exception as e: 
+        print(f"Error getting sys_id: {e}")
     return None
 
 # --- 3. ServiceNow Custom Tool Definitions ---
@@ -142,7 +140,8 @@ class SearchIncidentsTool(BaseTool):
 
     def _run(self, search_term: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         
         url = f"{instance}/api/now/table/incident"
         params = {"sysparm_query": f"short_descriptionLIKE{search_term}", "sysparm_limit": "5", "sysparm_fields": "number,short_description"}
@@ -153,7 +152,8 @@ class SearchIncidentsTool(BaseTool):
             response.raise_for_status()
             results = response.json().get("result", [])
             
-            if not results: return f"No incidents found matching '{search_term}'."
+            if not results: 
+                return f"No incidents found matching '{search_term}'."
             
             formatted_results = ["Found incidents:"]
             for item in results: 
@@ -176,9 +176,11 @@ class CreateIncidentTool(BaseTool):
     args_schema: Type[BaseModel] = CreateIncidentInput
     def _run(self, short_description: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         caller_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", "Abel Tuter")
-        if not caller_sys_id: return "Could not find the default caller 'Abel Tuter' to create the incident."
+        if not caller_sys_id: 
+            return "Could not find the default caller 'Abel Tuter' to create the incident."
         url = f"{instance}/api/now/table/incident"
         payload = {"short_description": short_description, "caller_id": caller_sys_id, "urgency": "3", "impact": "3"}
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -187,7 +189,8 @@ class CreateIncidentTool(BaseTool):
             response.raise_for_status()
             new_incident_number = response.json().get("result", {}).get("number", "UNKNOWN")
             return f"Successfully created new incident: {new_incident_number}."
-        except Exception as e: return f"An error occurred while creating the incident: {e}"
+        except Exception as e: 
+            return f"An error occurred while creating the incident: {e}"
     def _arun(self, short_description: str): raise NotImplementedError()
 
 class UpdateIncidentInput(BaseModel):
@@ -199,9 +202,11 @@ class UpdateIncidentTool(BaseTool):
     args_schema: Type[BaseModel] = UpdateIncidentInput
     def _run(self, incident_number: str, work_note: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
-        if not incident_sys_id: return f"Could not find incident {incident_number} to update."
+        if not incident_sys_id: 
+            return f"Could not find incident {incident_number} to update."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
         payload = {"work_notes": work_note}
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -209,7 +214,8 @@ class UpdateIncidentTool(BaseTool):
             response = requests.patch(url, auth=(user, pwd), headers=headers, json=payload)
             response.raise_for_status()
             return f"Successfully added note to incident {incident_number}."
-        except Exception as e: return f"An error occurred while updating the incident: {e}"
+        except Exception as e: 
+            return f"An error occurred while updating the incident: {e}"
     def _arun(self, incident_number: str, work_note: str): raise NotImplementedError()
 
 class ListOpenIncidentsForUserInput(BaseModel):
@@ -220,9 +226,11 @@ class ListOpenIncidentsForUserTool(BaseTool):
     args_schema: Type[BaseModel] = ListOpenIncidentsForUserInput
     def _run(self, user_name: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         caller_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", user_name)
-        if not caller_sys_id: return f"Could not find a user named '{user_name}'."
+        if not caller_sys_id: 
+            return f"Could not find a user named '{user_name}'."
         url = f"{instance}/api/now/table/incident"
         params = {"sysparm_query": f"caller_id={caller_sys_id}^active=true", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state"}
         headers = {"Accept": "application/json"}
@@ -230,11 +238,14 @@ class ListOpenIncidentsForUserTool(BaseTool):
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
-            if not results: return f"No open incidents found for {user_name}."
+            if not results: 
+                return f"No open incidents found for {user_name}."
             formatted_results = [f"Open incidents for {user_name}:"]
-            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
+            for item in results: 
+                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
             return "\n".join(formatted_results)
-        except Exception as e: return f"An error occurred: {e}"
+        except Exception as e: 
+            return f"An error occurred: {e}"
     def _arun(self, user_name: str): raise NotImplementedError()
 
 class ListIncidentsAssignedToUserInput(BaseModel):
@@ -245,9 +256,11 @@ class ListIncidentsAssignedToUserTool(BaseTool):
     args_schema: Type[BaseModel] = ListIncidentsAssignedToUserInput
     def _run(self, user_name: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         assignee_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", user_name)
-        if not assignee_sys_id: return f"Could not find a user named '{user_name}' to check assignments."
+        if not assignee_sys_id: 
+            return f"Could not find a user named '{user_name}' to check assignments."
         url = f"{instance}/api/now/table/incident"
         params = {"sysparm_query": f"assigned_to={assignee_sys_id}", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state"}
         headers = {"Accept": "application/json"}
@@ -255,11 +268,14 @@ class ListIncidentsAssignedToUserTool(BaseTool):
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
-            if not results: return f"No incidents are currently assigned to {user_name}."
+            if not results: 
+                return f"No incidents are currently assigned to {user_name}."
             formatted_results = [f"Incidents assigned to {user_name}:"]
-            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
+            for item in results: 
+                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
             return "\n".join(formatted_results)
-        except Exception as e: return f"An error occurred: {e}"
+        except Exception as e: 
+            return f"An error occurred: {e}"
     def _arun(self, user_name: str): raise NotImplementedError()
 
 class SearchKnowledgeBaseInput(BaseModel):
@@ -370,9 +386,11 @@ class DeleteIncidentTool(BaseTool):
     args_schema: Type[BaseModel] = DeleteIncidentInput
     def _run(self, incident_number: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
-        if not incident_sys_id: return f"Could not find incident {incident_number} to delete."
+        if not incident_sys_id: 
+            return f"Could not find incident {incident_number} to delete."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
         headers = {"Accept": "application/json"}
         try:
@@ -397,9 +415,11 @@ class ResolveIncidentTool(BaseTool):
     args_schema: Type[BaseModel] = ResolveIncidentInput
     def _run(self, incident_number: str, resolution_note: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
-        if not incident_sys_id: return f"Could not find incident {incident_number} to resolve."
+        if not incident_sys_id: 
+            return f"Could not find incident {incident_number} to resolve."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
         payload = {"state": "6", "resolution_notes": resolution_note}  # '6' is the out-of-the-box value for 'Resolved' state
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
@@ -424,7 +444,8 @@ class AssignIncidentTool(BaseTool):
     args_schema: Type[BaseModel] = AssignIncidentInput
     def _run(self, incident_number: str, assign_to_user: Optional[str] = None, assign_to_group: Optional[str] = None):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
          # Handle null values from LLM
         if assign_to_user == "null":
             assign_to_user = None
@@ -437,21 +458,24 @@ class AssignIncidentTool(BaseTool):
             return "Please provide either a user or a group, not both."
 
         incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
-        if not incident_sys_id: return f"Could not find incident {incident_number} to assign."
+        if not incident_sys_id: 
+            return f"Could not find incident {incident_number} to assign."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
         payload = {}
-        if assign_to_user and assign_to_group: return "Please provide either a user or a group to assign the incident, not both."
+        if assign_to_user and assign_to_group: 
+            return "Please provide either a user or a group to assign the incident, not both."
         if assign_to_user:
             assignee_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", assign_to_user)
-            if not assignee_sys_id: return f"Could not find a user named '{assign_to_user}'."
+            if not assignee_sys_id: 
+                return f"Could not find a user named '{assign_to_user}'."
             payload["assigned_to"] = assignee_sys_id
-            note = f"Incident assigned to user {assign_to_user}."
         elif assign_to_group:
             group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", assign_to_group)
-            if not group_sys_id: return f"Could not find a group named '{assign_to_group}'."
+            if not group_sys_id: 
+                return f"Could not find a group named '{assign_to_group}'."
             payload["assignment_group"] = group_sys_id
-            note = f"Incident assigned to group {assign_to_group}."
-        else: return "Please specify a user or a group to assign the incident to."
+        else: 
+            return "Please specify a user or a group to assign the incident to."
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         try:
             response = requests.patch(url, auth=(user, pwd), headers=headers, json=payload)
@@ -472,9 +496,11 @@ class GetIncidentMetricsTool(BaseTool):
     args_schema: Type[BaseModel] = GetIncidentMetricsInput
     def _run(self, group_name: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
-        if not group_sys_id: return f"Could not find an assignment group named '{group_name}'."
+        if not group_sys_id: 
+            return f"Could not find an assignment group named '{group_name}'."
         url = f"{instance}/api/now/stats/incident"
         params = {"sysparm_query": f"assignment_group={group_sys_id}", "sysparm_count": "true", "sysparm_fields": "resolved_at", "sysparm_group_by": "assignment_group"}
         headers = {"Accept": "application/json"}
@@ -482,9 +508,11 @@ class GetIncidentMetricsTool(BaseTool):
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
-            if not results: return f"No metrics found for group '{group_name}'."
+            if not results: 
+                return f"No metrics found for group '{group_name}'."
             resolved_incidents = [item for item in results if item.get('resolved_at')]
-            if not resolved_incidents: return f"No resolved incidents found for group '{group_name}' to calculate metrics."
+            if not resolved_incidents: 
+                return f"No resolved incidents found for group '{group_name}' to calculate metrics."
             total_duration = 0
             count = 0
             for item in resolved_incidents:
@@ -496,7 +524,8 @@ class GetIncidentMetricsTool(BaseTool):
                     duration = resolved_at - created_at
                     total_duration += duration.total_seconds()
                     count += 1
-            if count == 0: return f"Could not calculate metrics for group '{group_name}' due to missing data."
+            if count == 0: 
+                return f"Could not calculate metrics for group '{group_name}' due to missing data."
             avg_duration_seconds = total_duration / count
             avg_duration_minutes = avg_duration_seconds / 60
             avg_duration_hours = avg_duration_minutes / 60
@@ -516,9 +545,11 @@ class CountIncidentsForGroupTool(BaseTool):
 
     def _run(self, group_name: str):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
-        if not group_sys_id: return f"Could not find an assignment group named '{group_name}'."
+        if not group_sys_id: 
+            return f"Could not find an assignment group named '{group_name}'."
         
         url = f"{instance}/api/now/stats/incident"
         params = {"sysparm_count": "true", "sysparm_query": f"assignment_group={group_sys_id}"}
@@ -547,9 +578,11 @@ class ListIncidentsForGroupTool(BaseTool):
 
     def _run(self, group_name: str, limit: int = 10):
         instance, user, pwd = get_servicenow_credentials()
-        if not instance: return "ServiceNow credentials not configured."
+        if not instance: 
+            return "ServiceNow credentials not configured."
         group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
-        if not group_sys_id: return f"Could not find a group named '{group_name}'."
+        if not group_sys_id: 
+            return f"Could not find a group named '{group_name}'."
         
         url = f"{instance}/api/now/table/incident"
         params = {"sysparm_limit": str(limit), "sysparm_query": f"assignment_group={group_sys_id}", "sysparm_fields": "number,short_description,state"}
@@ -559,7 +592,8 @@ class ListIncidentsForGroupTool(BaseTool):
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
             results = response.json().get("result", [])
-            if not results: return f"No incidents found for '{group_name}'."
+            if not results: 
+                return f"No incidents found for '{group_name}'."
             
             formatted_results = [f"Found {len(results)} incidents for '{group_name}':"]
             for item in results:

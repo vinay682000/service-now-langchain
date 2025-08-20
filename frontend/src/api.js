@@ -50,12 +50,12 @@ export const getBotResponse = async (userMessage) => {
             if (!response.ok) {
                 if (response.status >= 400 && response.status < 500) {
                     let errorData = {};
-                    try { errorData = await response.json(); } catch {}
+                    try { errorData = await response.json(); } catch (e) {console.error("API request failed:", e);}
                     throw new Error(errorData.reply || errorData.error || `Error: ${response.status}`);
                 }
                 
                 let errorData = {};
-                try { errorData = await response.json(); } catch {}
+                try { errorData = await response.json(); } catch (e) {console.error("API request failed:", e);}
                 throw new Error(errorData.detail || errorData.error || `Backend error: ${response.status}`);
             }
 

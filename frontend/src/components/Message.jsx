@@ -1,5 +1,5 @@
-// frontend/src/components/Message.jsx
 import React from 'react';
+import PropTypes from 'prop-types'; // 1. Import PropTypes
 
 function Message({ sender, text }) {
   const isUser = sender === 'user';
@@ -13,5 +13,11 @@ function Message({ sender, text }) {
     </div>
   );
 }
+
+// 2. Define propTypes
+Message.propTypes = {
+  sender: PropTypes.string.isRequired, // sender is a required string
+  text: PropTypes.string.isRequired,   // text is a required string
+};
 
 export default Message;

@@ -1,6 +1,5 @@
 # frontend/src/tools.py
 from langchain.tools import BaseTool
-import requests
 
 # Placeholder for your ServiceNow instance details
 SN_INSTANCE_URL = "https://your_instance_name.service-now.com"
