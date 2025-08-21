@@ -1,10 +1,20 @@
-// FIX 1: Ensure React is imported (it should be, but let's be explicit)
-import React from 'react';
-// FIX 2: Import PropTypes
+// chatwindow.jsx
+import React, { useRef, useEffect } from 'react'; // ADD: useRef and useEffect hooks
 import PropTypes from 'prop-types';
 
-// If you prefer using dangerouslySetInnerHTML (more efficient for large texts)
 function ChatWindow({ messages }) {
+  // ADD: A ref to the chat container element
+  const chatContainerRef = useRef(null);
+  
+  // ADD: A hook that runs whenever the 'messages' array changes
+  useEffect(() => {
+    // Check if the ref has a value (the div exists)
+    if (chatContainerRef.current) {
+      // Set the scroll position to the bottom of the container
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+    }
+  }, [messages]); // The dependency array: this effect runs when 'messages' is updated
+
   const formatMessage = (text) => {
     if (!text) return '';
     
@@ -21,7 +31,11 @@ function ChatWindow({ messages }) {
   };
 
   return (
-    <div className="flex-1 p-4 overflow-y-auto max-h-96 bg-gray-50">
+    // ADD: Attach the ref to the main chat window div
+    <div 
+      ref={chatContainerRef} 
+      className="flex-1 p-4 overflow-y-auto max-h-96 bg-gray-50"
+    >
       {messages.map((message, index) => (
         <div
           key={index}
@@ -50,14 +64,13 @@ function ChatWindow({ messages }) {
   );
 }
 
-// FIX 3: Define the propTypes for the component
 ChatWindow.propTypes = {
-  messages: PropTypes.arrayOf( // 'messages' is an array...
-    PropTypes.shape({           // ...of objects with this shape
+  messages: PropTypes.arrayOf(
+    PropTypes.shape({
       sender: PropTypes.string.isRequired,
       text: PropTypes.string.isRequired,
     })
-  ).isRequired, // ...and this array is required.
+  ).isRequired,
 };
 
 export default ChatWindow;

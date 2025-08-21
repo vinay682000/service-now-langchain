@@ -26,6 +26,7 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.tools import BaseTool
+from langchain_openai import AzureChatOpenAI
 
 # --- 1. Load Environment Variables ---
 load_dotenv()
@@ -63,16 +64,24 @@ def get_sys_id(instance, user, pwd, table, query_field, query_value):
     return None
 
 # --- 3. ServiceNow Custom Tool Definitions ---
+# Add this import at the top of your file if it's not already there
+
 class GetIncidentInput(BaseModel):
     incident_number: str = Field(description="The full incident number, e.g., 'INC0010001'.")
+
 class GetIncidentTool(BaseTool):
     name: str = "get_incident_details"
     description: str = "Use this tool to get details for a specific incident ticket. The incident number must be the full number, including the 'INC' prefix."
     args_schema: Type[BaseModel] = GetIncidentInput
     
     def _run(self, incident_number: str):
+        # LOG 1: Tool started
+        tool_start_time = time.time()
+        logger.info(f"🛠️  Tool '{self.name}' started for incident: {incident_number}")
+        
         instance, user, pwd = get_servicenow_credentials()
         if not instance: 
+            logger.error("❌ ServiceNow credentials not configured.")
             return "ServiceNow credentials not configured."
         
         url = f"{instance}/api/now/table/incident"
@@ -83,13 +92,24 @@ class GetIncidentTool(BaseTool):
         }
         headers = {"Accept": "application/json"}
         
+        # LOG 2: Before API call
+        api_start_time = time.time()
+        logger.info(f"🌐 Making ServiceNow API call to: {url}")
+        
         try:
-            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            # CRITICAL: Added timeout=30 seconds to prevent hanging forever
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params, timeout=30)
+            
+            # LOG 3: API call finished, log the time
+            api_time = time.time() - api_start_time
+            logger.info(f"✅ ServiceNow API response received in: {api_time:.2f} seconds")
+            
             response.raise_for_status()
             data = response.json()
             
             results = data.get("result", [])
             if not results: 
+                logger.warning(f"⚠️  No incident found for: {incident_number}")
                 return f"No incident found with the number {incident_number}."
             
             incident_data = results[0]
@@ -123,13 +143,27 @@ class GetIncidentTool(BaseTool):
                 f"- Caller: {get_value('caller_id')}\n"
                 f"- Created On: {get_value('sys_created_on')}"
             )
+            
+            # LOG 4: Entire tool finished
+            total_tool_time = time.time() - tool_start_time
+            logger.info(f"🏁 Tool '{self.name}' completed in: {total_tool_time:.2f} seconds")
+            
             return formatted_result
             
+        except requests.exceptions.Timeout:
+            # LOG 5: Timeout occurred
+            api_time = time.time() - api_start_time
+            logger.error(f"⏰ SERVICE NOW API TIMEOUT after {api_time:.2f}s for {incident_number}")
+            return f"Error: The request to ServiceNow timed out after {api_time:.2f}s while fetching {incident_number}."
+            
         except requests.exceptions.HTTPError as err:
+            api_time = time.time() - api_start_time
+            logger.error(f"❌ HTTP error after {api_time:.2f}s: {err}")
             return f"An HTTP error occurred: {err}"
         except Exception as e:
+            api_time = time.time() - api_start_time
+            logger.error(f"🔥 Unexpected error after {api_time:.2f}s: {e}")
             return f"An unexpected error occurred: {e}"
-
 class SearchIncidentsInput(BaseModel):
     search_term: str = Field(description="Keyword or phrase to search for in incident short descriptions.")
 
@@ -681,7 +715,19 @@ class GetMultipleIncidentsTool(BaseTool):
 
 # --- 4. LangChain Agent Setup ---
 # --- MODIFIED: Swapped to a model that supports tool calling ---
-llm = ChatNVIDIA(model="meta/llama-3.1-405b-instruct")
+#llm = ChatNVIDIA(model="meta/llama-3.1-405b-instruct")
+llm = AzureChatOpenAI(
+    azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"), # e.g., "https://your-resource.openai.azure.com"
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    api_version="2025-01-01-preview", # Use a recent version
+    azure_deployment="gpt-4o-mini", # The name of your deployment in Azure portal
+    temperature=0,
+    max_tokens=500, # Enough for a response, but not too long
+    timeout=10, # Fail fast if the model is slow
+    request_timeout=10
+)
+    
+
 
 tools = [
     GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
@@ -699,6 +745,7 @@ prompt = ChatPromptTemplate.from_messages([
 5. Keep responses concise but informative
 6. For single incidents, use get_incident_details tool
 7. Stop after presenting the requested information
+8. NEVER use markdown formatting like **bold** or *italics* in your responses. Use plain text only.
 
 Available capabilities: Get incident details, search knowledge base, create/update incidents, and more.
 
@@ -715,10 +762,10 @@ agent_executor = AgentExecutor(
     tools=tools, 
     verbose=True,
     handle_parsing_errors=True,
-    max_iterations=10,
+    max_iterations=4,
     early_stopping_method='force',
     return_intermediate_steps=False,
-    max_execution_time=60
+    max_execution_time=45
 )
 
 # --- 5. FastAPI App and Endpoint ---
@@ -777,13 +824,16 @@ async def options_handler():
 
 @app.post("/api/chat")
 async def handle_chat_request(request: ChatRequest):
-    start_time = time.time()
+    total_start_time = time.time()
     logger.info(f"📨 Received request - Session: {request.session_id}, Message: '{request.message}'")
+    
     try:
         if request.session_id not in chat_histories:
             chat_histories[request.session_id] = {"messages": []}
             logger.info(f"🆕 New session created: {request.session_id}")
         
+        # TIME THE AGENT EXECUTION
+        agent_start_time = time.time()
         try:
             response = await asyncio.wait_for(
                 asyncio.get_event_loop().run_in_executor(
@@ -795,8 +845,9 @@ async def handle_chat_request(request: ChatRequest):
                 ),
                 timeout=80.0
             )
-            processing_time = time.time() - start_time
-            logger.info(f"✅ Request processed in {processing_time:.2f}s - Output: '{response['output'][:100]}...'")
+            agent_time = time.time() - agent_start_time
+            logger.info(f"⏱️ Agent execution took: {agent_time:.2f}s")
+            
         except asyncio.TimeoutError:
             logger.warning(f"⏰ Timeout after 80s - Message: '{request.message}'")
             return JSONResponse(
@@ -819,6 +870,8 @@ async def handle_chat_request(request: ChatRequest):
         if len(chat_histories[request.session_id]["messages"]) > 20:
             chat_histories[request.session_id]["messages"] = chat_histories[request.session_id]["messages"][-10:]
         
+        total_time = time.time() - total_start_time
+        logger.info(f"✅ Total request processed in {total_time:.2f}s")
         return {"reply": response['output']}
     
     except ValidationError as e:
@@ -833,7 +886,7 @@ async def handle_chat_request(request: ChatRequest):
             content={"reply": "Our service is temporarily unavailable. Please try again in a moment."},
             status_code=500
         )
-
+        
 app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 if __name__ == "__main__":

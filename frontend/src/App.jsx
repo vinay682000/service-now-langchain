@@ -14,7 +14,6 @@ const getSessionId = () => {
 function App() {
   const [messages, setMessages] = useState([]); // Start empty for better LCP
   const [isLoading, setIsLoading] = useState(false);
-  const [setIsLongOperation] = useState(false);
   const sessionIdRef = useRef(getSessionId());
   const chatEndRef = useRef(null);
   const longOpTimerRef = useRef(null);
@@ -32,7 +31,6 @@ function App() {
 
   const handleSendMessage = async (text) => {
     setIsLoading(true);
-    setIsLongOperation(false);
     
     const userMessage = { sender: 'user', text };
     const thinkingMessage = { sender: 'bot', text: 'Thinking...', isThinking: true };
@@ -41,7 +39,6 @@ function App() {
 
     // Show "taking longer" message after 15 seconds
     longOpTimerRef.current = setTimeout(() => {
-      setIsLongOperation(true);
       setMessages(prev => prev.map(msg => 
         msg.isThinking ? { ...msg, text: "This is taking a bit longer than usual..." } : msg
       ));
@@ -67,7 +64,6 @@ function App() {
       // Clean up timers and loading states
       clearTimeout(longOpTimerRef.current);
       setIsLoading(false);
-      setIsLongOperation(false);
     }
   };
 
