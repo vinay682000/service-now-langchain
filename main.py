@@ -10,18 +10,20 @@ import asyncio
 import concurrent.futures
 import logging
 import time
+import json
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator, ValidationError
-from typing import Type, List, Optional
+from sse_starlette.sse import EventSourceResponse
+from typing import Type, List, Optional, Dict
 
 # --- LangChain Imports ---
-from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
+#from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -726,9 +728,6 @@ llm = AzureChatOpenAI(
     timeout=10, # Fail fast if the model is slow
     request_timeout=10
 )
-    
-
-
 tools = [
     GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
     ListOpenIncidentsForUserTool(), ListIncidentsAssignedToUserTool(),
@@ -745,7 +744,7 @@ prompt = ChatPromptTemplate.from_messages([
 5. Keep responses concise but informative
 6. For single incidents, use get_incident_details tool
 7. Stop after presenting the requested information
-8. NEVER use markdown formatting like **bold** or *italics* in your responses. Use plain text only.
+8. Use markdown formatting (headings, bullet points, code blocks, bold/italics) where appropriate for readability
 
 Available capabilities: Get incident details, search knowledge base, create/update incidents, and more.
 
@@ -783,7 +782,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev",
-        "http://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev"
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev",
+        "https://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev",
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev"
     ],
     allow_credentials=True,
     allow_methods=["POST", "OPTIONS", "GET"],  # Explicitly specify needed methods
@@ -823,70 +824,143 @@ async def options_handler():
     )
 
 @app.post("/api/chat")
-async def handle_chat_request(request: ChatRequest):
+@app.post("/api/chat-stream")
+async def handle_chat_request(chat_request: ChatRequest, request: Request = None):
     total_start_time = time.time()
-    logger.info(f"📨 Received request - Session: {request.session_id}, Message: '{request.message}'")
+    logger.info(f"📨 Received request - Session: {chat_request.session_id}, Message: '{chat_request.message}'")
     
-    try:
-        if request.session_id not in chat_histories:
-            chat_histories[request.session_id] = {"messages": []}
-            logger.info(f"🆕 New session created: {request.session_id}")
-        
-        # TIME THE AGENT EXECUTION
-        agent_start_time = time.time()
+    # Check if client wants streaming (via header)
+    if request:
+        accept_header = request.headers.get("accept", "")
+        is_streaming = "text/event-stream" in accept_header
+    else:
+        is_streaming = False
+    
+    if not is_streaming:
+        # Original non-streaming logic
         try:
-            response = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None, 
-                    lambda: agent_executor.invoke({
-                        "input": request.message,
-                        "chat_history": chat_histories[request.session_id]["messages"]
-                    })
-                ),
-                timeout=80.0
-            )
-            agent_time = time.time() - agent_start_time
-            logger.info(f"⏱️ Agent execution took: {agent_time:.2f}s")
+            if chat_request.session_id not in chat_histories:
+                chat_histories[chat_request.session_id] = {"messages": []}
+                logger.info(f"🆕 New session created: {chat_request.session_id}")
             
-        except asyncio.TimeoutError:
-            logger.warning(f"⏰ Timeout after 80s - Message: '{request.message}'")
+            agent_start_time = time.time()
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(
+                        None, 
+                        lambda: agent_executor.invoke({
+                            "input": chat_request.message,
+                            "chat_history": chat_histories[chat_request.session_id]["messages"]
+                        })
+                    ),
+                    timeout=80.0
+                )
+                agent_time = time.time() - agent_start_time
+                logger.info(f"⏱️ Agent execution took: {agent_time:.2f}s")
+                
+            except asyncio.TimeoutError:
+                logger.warning(f"⏰ Timeout after 80s - Message: '{chat_request.message}'")
+                return JSONResponse(
+                    content={"reply": "This operation is taking longer than expected. Please try a simpler query or fewer incidents at once."},
+                    status_code=408
+                )            
+            except Exception as e:
+                logger.error(f"❌ Agent execution failed: {str(e)}")
+                return JSONResponse(
+                    content={"reply": "I encountered an error while processing your request. Please try again with a different query."},
+                    status_code=500
+                )
+            
+            # Update chat history
+            chat_histories[chat_request.session_id]["messages"].extend([
+                HumanMessage(content=chat_request.message),
+                AIMessage(content=response['output'])
+            ])
+            
+            # Prevent history from growing too large
+            if len(chat_histories[chat_request.session_id]["messages"]) > 20:
+                chat_histories[chat_request.session_id]["messages"] = chat_histories[chat_request.session_id]["messages"][-10:]
+            
+            total_time = time.time() - total_start_time
+            logger.info(f"✅ Total request processed in {total_time:.2f}s")
+            return {"reply": response['output']}
+        
+        except ValidationError as e:
+            logger.warning(f"⚠️ Validation error: {str(e)}")
             return JSONResponse(
-                content={"reply": "This operation is taking longer than expected. Please try a simpler query or fewer incidents at once."},
-                status_code=408
-            )            
+                content={"error": "Invalid request format. Please check your input."},
+                status_code=400
+            )
         except Exception as e:
-            logger.error(f"❌ Agent execution failed: {str(e)}")
+            logger.error(f"🔥 Unexpected error: {str(e)}")
             return JSONResponse(
-                content={"reply": "I encountered an error while processing your request. Please try again with a different query."},
+                content={"reply": "Our service is temporarily unavailable. Please try again in a moment."},
                 status_code=500
             )
+    else:
+        # Streaming response
+        async def event_generator():
+            try:
+                if chat_request.session_id not in chat_histories:
+                    chat_histories[chat_request.session_id] = {"messages": []}
+                    logger.info(f"🆕 New session created: {chat_request.session_id}")
+                
+                # Get the full response first
+                response = await asyncio.get_event_loop().run_in_executor(
+                    None, 
+                    lambda: agent_executor.invoke({
+                        "input": chat_request.message,
+                        "chat_history": chat_histories[chat_request.session_id]["messages"]
+                    })
+                )
+                
+                # Stream the response token by token
+                output_text = response['output']
+                words = output_text.split()
+                
+                for i, word in enumerate(words):
+                    # Send each word with a delay for smooth streaming
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "token": word + (" " if i < len(words) - 1 else ""),
+                            "complete": False
+                        })
+                    }
+                    await asyncio.sleep(0.05)
+                
+                # Send completion event
+                yield {
+                    "event": "complete",
+                    "data": json.dumps({
+                        "complete": True,
+                        "full_message": output_text
+                    })
+                }
+                
+                # Update history after successful streaming
+                chat_histories[chat_request.session_id]["messages"].extend([
+                    HumanMessage(content=chat_request.message),
+                    AIMessage(content=output_text)
+                ])
+                
+            except asyncio.TimeoutError:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({
+                        "error": "Request timeout. Please try a simpler query."
+                    })
+                }
+            except Exception as e:
+                yield {
+                    "event": "error", 
+                    "data": json.dumps({
+                        "error": f"Processing error: {str(e)}"
+                    })
+                }
         
-        # Update chat history
-        chat_histories[request.session_id]["messages"].extend([
-            HumanMessage(content=request.message),
-            AIMessage(content=response['output'])
-        ])
-        # Prevent history from growing too large
-        if len(chat_histories[request.session_id]["messages"]) > 20:
-            chat_histories[request.session_id]["messages"] = chat_histories[request.session_id]["messages"][-10:]
-        
-        total_time = time.time() - total_start_time
-        logger.info(f"✅ Total request processed in {total_time:.2f}s")
-        return {"reply": response['output']}
-    
-    except ValidationError as e:
-        logger.warning(f"⚠️ Validation error: {str(e)}")
-        return JSONResponse(
-            content={"error": "Invalid request format. Please check your input."},
-            status_code=400
-        )
-    except Exception as e:
-        logger.error(f"🔥 Unexpected error: {str(e)}")
-        return JSONResponse(
-            content={"reply": "Our service is temporarily unavailable. Please try again in a moment."},
-            status_code=500
-        )
-        
+        return EventSourceResponse(event_generator())
+
 app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="static")
 
 if __name__ == "__main__":

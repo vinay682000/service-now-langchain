@@ -1,10 +1,13 @@
 // frontend/src/App.jsx
 import React, { useState, useEffect, useRef } from 'react';
-import ChatWindow from './components/ChatWindow';
 import ChatInput from './components/ChatInput';
-import { getBotResponse } from './api';
+import { getBotResponseSmart } from './api';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import './App.css';
 
-// Generate a unique session ID
+console.log("🔄 App.jsx version: 2.2 - Streaming + Markdown + Typing Dots");
+
 const getSessionId = () => {
   const sessionId = localStorage.getItem('sessionId') || `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   localStorage.setItem('sessionId', sessionId);
@@ -12,78 +15,62 @@ const getSessionId = () => {
 };
 
 function App() {
-  const [messages, setMessages] = useState([]); // Start empty for better LCP
+  const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
-  const sessionIdRef = useRef(getSessionId());
   const chatEndRef = useRef(null);
   const longOpTimerRef = useRef(null);
+  const streamingMessageIndexRef = useRef(-1);
 
-  // Load initial message after component mounts (LCP optimization)
   useEffect(() => {
     const timer = setTimeout(() => {
-      setMessages([
-        { sender: 'bot', text: 'Hello! I am your ServiceNow Assistant. How can I help you today?' },
-      ]);
-    }, 100); // Small delay to improve LCP
-
+      setMessages([{ sender: 'bot', text: 'Hello! I am your ServiceNow Assistant. How can I help you today?' }]);
+    }, 100);
     return () => clearTimeout(timer);
   }, []);
 
   const handleSendMessage = async (text) => {
     setIsLoading(true);
-    
-    const userMessage = { sender: 'user', text };
-    const thinkingMessage = { sender: 'bot', text: 'Thinking...', isThinking: true };
-    
-    setMessages((prev) => [...prev, userMessage, thinkingMessage]);
 
-    // Show "taking longer" message after 15 seconds
+    const userMessage = { sender: 'user', text };
+    const thinkingMessage = { sender: 'bot', text: '', isTyping: true, isStreaming: true };
+
+    setMessages(prev => [...prev, userMessage, thinkingMessage]);
+    streamingMessageIndexRef.current = messages.length + 1;
+
     longOpTimerRef.current = setTimeout(() => {
-      setMessages(prev => prev.map(msg => 
-        msg.isThinking ? { ...msg, text: "This is taking a bit longer than usual..." } : msg
-      ));
-    }, 15000);
+      setMessages(prev => prev.map((msg, idx) => idx === streamingMessageIndexRef.current && msg.text === '' ? { ...msg, text: "Connecting..." } : msg));
+    }, 3000);
+
+    const callbacks = {
+      onToken: (token, fullMessageSoFar) => {
+        clearTimeout(longOpTimerRef.current);
+        setMessages(prev => prev.map((msg, idx) => idx === streamingMessageIndexRef.current ? { ...msg, text: fullMessageSoFar, isTyping: true } : msg));
+      },
+      onComplete: (fullMessage) => {
+        clearTimeout(longOpTimerRef.current);
+        setMessages(prev => prev.map((msg, idx) => idx === streamingMessageIndexRef.current ? { sender: 'bot', text: fullMessage, isTyping: false } : msg));
+        setIsLoading(false);
+      },
+      onError: (error) => {
+        clearTimeout(longOpTimerRef.current);
+        setMessages(prev => prev.map((msg, idx) => idx === streamingMessageIndexRef.current ? { sender: 'error', text: error } : msg));
+        setIsLoading(false);
+      }
+    };
 
     try {
-      const botReply = await getBotResponse(text, sessionIdRef.current);
-      
-      // Replace thinking message with actual reply
-      setMessages((prev) => 
-        prev.map((msg) => 
-          msg.isThinking ? { sender: 'bot', text: botReply } : msg
-        )
-      );
+      await getBotResponseSmart(text, callbacks);
     } catch (error) {
-      // Replace thinking message with error
-      setMessages((prev) => 
-        prev.map((msg) => 
-          msg.isThinking ? { sender: 'error', text: error.message } : msg
-        )
-      );
-    } finally {
-      // Clean up timers and loading states
-      clearTimeout(longOpTimerRef.current);
-      setIsLoading(false);
+      callbacks.onError(error.message);
     }
   };
 
-  // Clean up on unmount
   useEffect(() => {
-    return () => {
-      if (longOpTimerRef.current) {
-        clearTimeout(longOpTimerRef.current);
-      }
-    };
+    return () => clearTimeout(longOpTimerRef.current);
   }, []);
 
-  // Scroll to the bottom when messages update
   useEffect(() => {
-    if (messages.length > 0) {
-      chatEndRef.current?.scrollIntoView({ 
-        behavior: 'smooth',
-        block: 'nearest'
-      });
-    }
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [messages]);
 
   return (
@@ -92,18 +79,28 @@ function App() {
         <header className="bg-gradient-to-r from-blue-500 to-indigo-500 p-4 text-center text-white font-bold text-xl shadow-md">
           ServiceNow Assistant
         </header>
-        
-        {/* Loading skeleton for better LCP */}
+
         {messages.length === 0 && (
           <div className="p-4 animate-pulse">
             <div className="h-4 bg-gray-200 rounded w-3/4 mb-2"></div>
             <div className="h-4 bg-gray-200 rounded w-1/2"></div>
           </div>
         )}
-        
-        <ChatWindow messages={messages} />
+
+        <div className="flex-1 overflow-y-auto p-4 flex flex-col space-y-4">
+          {messages.map((msg, idx) => (
+            <div key={idx} className={`message ${msg.sender}`}>
+              {msg.sender === 'bot' ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
+              ) : (
+                <span>{msg.text}</span>
+              )}
+            </div>
+          ))}
+          <div ref={chatEndRef} aria-hidden="true" />
+        </div>
+
         <ChatInput onSendMessage={handleSendMessage} disabled={isLoading} />
-        <div ref={chatEndRef} aria-hidden="true" />
       </div>
     </div>
   );

@@ -1,23 +1,40 @@
 import React from 'react';
-import PropTypes from 'prop-types'; // 1. Import PropTypes
+import PropTypes from 'prop-types';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
-function Message({ sender, text }) {
+function Message({ sender, text, isTyping }) {
   const isUser = sender === 'user';
-  const messageClasses = isUser
-    ? 'bg-blue-500 text-white self-end'
-    : 'bg-gray-300 text-gray-800 self-start';
+
+  const bubbleClasses = isUser
+    ? 'bg-blue-600 text-white self-end rounded-br-none'
+    : 'bg-gray-200 text-gray-800 self-start rounded-bl-none';
 
   return (
-    <div className={`flex flex-col max-w-md p-3 rounded-lg ${messageClasses}`}>
-      <p>{text}</p>
+    <div className={`flex w-full mb-2 ${isUser ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[70%] p-3 rounded-2xl shadow-md break-words whitespace-pre-wrap ${bubbleClasses}`}
+      >
+        {isTyping && !isUser ? (
+          <span className="typing-dots">● ● ●</span>
+        ) : isUser ? (
+          <span>{text}</span>
+        ) : (
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+        )}
+      </div>
     </div>
   );
 }
 
-// 2. Define propTypes
 Message.propTypes = {
-  sender: PropTypes.string.isRequired, // sender is a required string
-  text: PropTypes.string.isRequired,   // text is a required string
+  sender: PropTypes.string.isRequired,
+  text: PropTypes.string.isRequired,
+  isTyping: PropTypes.bool,
+};
+
+Message.defaultProps = {
+  isTyping: false,
 };
 
 export default Message;

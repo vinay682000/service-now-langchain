@@ -1,41 +1,46 @@
-// chatwindow.jsx
-import React, { useRef, useEffect } from 'react'; // ADD: useRef and useEffect hooks
-import PropTypes from 'prop-types';
+// frontend/src/components/ChatWindow.jsx
+import React from 'react';
 
 function ChatWindow({ messages }) {
-  // ADD: A ref to the chat container element
-  const chatContainerRef = useRef(null);
-  
-  // ADD: A hook that runs whenever the 'messages' array changes
-  useEffect(() => {
-    // Check if the ref has a value (the div exists)
-    if (chatContainerRef.current) {
-      // Set the scroll position to the bottom of the container
-      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-    }
-  }, [messages]); // The dependency array: this effect runs when 'messages' is updated
-
   const formatMessage = (text) => {
-    if (!text) return '';
+    if (!text) return [];
     
-    // Convert URLs to links
-    text = text.replace(
-      /(https?:\/\/[^\s]+)/g, 
-      '<a href="$1" target="_blank" rel="noopener noreferrer" class="text-blue-500 hover:underline">$1</a>'
-    );
+    // Split by lines and URLs
+    const lines = text.split('\n');
+    const formattedLines = [];
     
-    // Convert line breaks to <br> tags
-    text = text.replace(/\n/g, '<br>');
+    lines.forEach((line, lineIndex) => {
+      if (lineIndex > 0) {
+        formattedLines.push(<br key={`br-${lineIndex}`} />);
+      }
+      
+      // Simple URL detection without innerHTML
+      const words = line.split(' ');
+      formattedLines.push(
+        ...words.map((word, wordIndex) => {
+          if (word.match(/^https?:\/\/\S+$/)) {
+            return (
+              <a
+                key={`link-${lineIndex}-${wordIndex}`}
+                href={word}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-500 hover:underline"
+              >
+                {word}{' '}
+              </a>
+            );
+          }
+          return <span key={`word-${lineIndex}-${wordIndex}`}>{word} </span>;
+        })
+      );
+    });
     
-    return { __html: text };
+    return formattedLines;
   };
 
   return (
-    // ADD: Attach the ref to the main chat window div
-    <div 
-      ref={chatContainerRef} 
-      className="flex-1 p-4 overflow-y-auto max-h-96 bg-gray-50"
-    >
+    <div className="flex-1 p-4 overflow-y-auto max-h-96 bg-gray-50">
       {messages.map((message, index) => (
         <div
           key={index}
@@ -54,23 +59,13 @@ function ChatWindow({ messages }) {
             {message.sender === 'user' ? 'You' : 
              message.sender === 'error' ? 'Error' : 'Assistant'}
           </div>
-          <div 
-            className="mt-1 text-gray-800"
-            dangerouslySetInnerHTML={formatMessage(message.text)}
-          />
+          <div className="mt-1 text-gray-800">
+            {formatMessage(message.text)}
+          </div>
         </div>
       ))}
     </div>
   );
 }
-
-ChatWindow.propTypes = {
-  messages: PropTypes.arrayOf(
-    PropTypes.shape({
-      sender: PropTypes.string.isRequired,
-      text: PropTypes.string.isRequired,
-    })
-  ).isRequired,
-};
 
 export default ChatWindow;
