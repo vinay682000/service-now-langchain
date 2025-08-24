@@ -20,7 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, validator, ValidationError
 from sse_starlette.sse import EventSourceResponse
-from typing import Type, List, Optional, Dict
+from typing import Type, List, Optional, Dict, Any, ClassVar
 
 # --- LangChain Imports ---
 #from langchain_nvidia_ai_endpoints import ChatNVIDIA # Using NVIDIA's library
@@ -66,109 +66,212 @@ def get_sys_id(instance, user, pwd, table, query_field, query_value):
     return None
 
 # --- 3. ServiceNow Custom Tool Definitions ---
-# Add this import at the top of your file if it's not already there
-
 class GetIncidentInput(BaseModel):
-    incident_number: str = Field(description="The full incident number, e.g., 'INC0010001'.")
+    incident_number: str = Field(description="The full incident number, e.g., 'INC0010001', 'INC0010025'.")
+    include_fields: Optional[List[str]] = Field(
+        default=None,
+        description="List of fields to include. Available: number, short_description, description, state, priority, assignment_group, caller_id, sys_created_on, resolved_at, closed_at, category, subcategory, severity, impact, urgency, assigned_to, resolution_notes, close_notes, close_code, resolution_code, business_service, configuration_item, watch_list, active, reopened_count, reassignment_count, comments, work_notes"
+    )
+    verbose: Optional[bool] = Field(
+        default=False,
+        description="Whether to include additional metadata and raw field values. Default: False"
+    )
+    format: Optional[str] = Field(
+        default="human",
+        description="Output format. Options: 'human' (readable text), 'json' (raw data), 'minimal' (brief summary). Default: 'human'"
+    )
+
+    @validator('incident_number')
+    def validate_incident_number(cls, v):
+        if not v.startswith('INC'):
+            raise ValueError("Incident number must start with 'INC' prefix")
+        if not v[3:].isdigit():
+            raise ValueError("Incident number must have digits after 'INC' prefix")
+        return v
+
+    @validator('format')
+    def validate_format(cls, v):
+        valid_formats = ['human', 'json', 'minimal']
+        if v not in valid_formats:
+            raise ValueError(f"Format must be one of: {', '.join(valid_formats)}")
+        return v
 
 class GetIncidentTool(BaseTool):
     name: str = "get_incident_details"
-    description: str = "Use this tool to get details for a specific incident ticket. The incident number must be the full number, including the 'INC' prefix."
+    description: str = "Use this tool to get comprehensive details for a specific incident ticket. Supports multiple output formats and field selection."
     args_schema: Type[BaseModel] = GetIncidentInput
     
-    def _run(self, incident_number: str):
-        # LOG 1: Tool started
+    # Class variables (not model fields) - using ClassVar annotation
+    FIELD_DISPLAY_NAMES: ClassVar[Dict[str, str]] = {
+        'number': 'Incident Number',
+        'short_description': 'Short Description',
+        'description': 'Description',
+        'state': 'State',
+        'priority': 'Priority',
+        'assignment_group': 'Assignment Group',
+        'caller_id': 'Caller',
+        'sys_created_on': 'Created On',
+        'resolved_at': 'Resolved At',
+        'closed_at': 'Closed At',
+        'category': 'Category',
+        'subcategory': 'Subcategory',
+        'severity': 'Severity',
+        'impact': 'Impact',
+        'urgency': 'Urgency',
+        'assigned_to': 'Assigned To',
+        'resolution_notes': 'Resolution Notes',
+        'close_notes': 'Close Notes',
+        'close_code': 'Close Code',
+        'resolution_code': 'Resolution Code',
+        'business_service': 'Business Service',
+        'configuration_item': 'Configuration Item',
+        'watch_list': 'Watch List',
+        'active': 'Active',
+        'reopened_count': 'Reopened Count',
+        'reassignment_count': 'Reassignment Count',
+        'comments': 'Comments',
+        'work_notes': 'Work Notes'
+    }
+
+    STATE_MAP: ClassVar[Dict[str, str]] = {
+        '1': 'New 🆕',
+        '2': 'In Progress 🚧',
+        '3': 'On Hold ⏸️',
+        '4': 'Awaiting User Info ℹ️',
+        '5': 'Awaiting Problem ❓',
+        '6': 'Resolved ✅',
+        '7': 'Closed 🔒'
+    }
+
+    PRIORITY_MAP: ClassVar[Dict[str, str]] = {
+        '1': 'Critical 🔴',
+        '2': 'High 🟠',
+        '3': 'Moderate 🟡',
+        '4': 'Low 🟢',
+        '5': 'Planning 🔵'
+    }
+
+    def _run(self, incident_number: str, include_fields: Optional[List[str]] = None,
+             verbose: bool = False, format: str = "human"):
+        
         tool_start_time = time.time()
-        logger.info(f"🛠️  Tool '{self.name}' started for incident: {incident_number}")
+        logger.info(f"🛠️  GetIncidentTool started for: {incident_number}")
         
         instance, user, pwd = get_servicenow_credentials()
         if not instance: 
             logger.error("❌ ServiceNow credentials not configured.")
             return "ServiceNow credentials not configured."
         
+        # Default fields if none specified
+        default_fields = ["number", "short_description", "description", "state", "priority", 
+                         "assignment_group", "caller_id", "sys_created_on"]
+        
+        fields_to_include = include_fields if include_fields else default_fields
+        fields_param = ",".join(fields_to_include)
+        
         url = f"{instance}/api/now/table/incident"
         params = {
             "sysparm_query": f"number={incident_number}", 
             "sysparm_limit": "1", 
-            "sysparm_fields": "number,short_description,description,state,assignment_group,caller_id,sys_created_on"
+            "sysparm_fields": fields_param,
+            "sysparm_display_value": "all"
         }
         headers = {"Accept": "application/json"}
         
-        # LOG 2: Before API call
         api_start_time = time.time()
-        logger.info(f"🌐 Making ServiceNow API call to: {url}")
+        logger.info(f"🌐 API call for: {incident_number}")
         
         try:
-            # CRITICAL: Added timeout=30 seconds to prevent hanging forever
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params, timeout=30)
-            
-            # LOG 3: API call finished, log the time
             api_time = time.time() - api_start_time
-            logger.info(f"✅ ServiceNow API response received in: {api_time:.2f} seconds")
+            logger.info(f"✅ API response in: {api_time:.2f}s")
             
             response.raise_for_status()
             data = response.json()
             
             results = data.get("result", [])
             if not results: 
-                logger.warning(f"⚠️  No incident found for: {incident_number}")
-                return f"No incident found with the number {incident_number}."
+                logger.warning(f"⚠️  No incident found: {incident_number}")
+                return f"No incident found with number: {incident_number}"
             
             incident_data = results[0]
             
-            # Simplified helper function for safe data access
-            def get_value(field_name, default='N/A'):
-                field_data = incident_data.get(field_name, {})
-                if isinstance(field_data, dict):
-                    return field_data.get('display_value', default)
-                return field_data or default
+            # Format based on requested output
+            if format == "json":
+                result = json.dumps(incident_data, indent=2)
+            elif format == "minimal":
+                result = self._format_minimal(incident_data)
+            else:
+                result = self._format_human_readable(incident_data, fields_to_include, verbose)
             
-            # Map state numbers to human-readable text
-            state_map = {
-                '1': 'New',
-                '2': 'In Progress',
-                '3': 'On Hold',
-                '4': 'Awaiting User Info',
-                '5': 'Awaiting Problem',
-                '6': 'Resolved',
-                '7': 'Closed'
-            }
+            total_time = time.time() - tool_start_time
+            logger.info(f"🏁 Tool completed in: {total_time:.2f}s")
             
-            state_display = state_map.get(str(get_value('state')), 'Unknown')
-            
-            formatted_result = (
-                f"Incident Details for {get_value('number')}:\n"
-                f"- Short Description: {get_value('short_description')}\n"
-                f"- Description: {get_value('description', 'No description provided')}\n"
-                f"- State: {state_display}\n"
-                f"- Assignment Group: {get_value('assignment_group', 'Not assigned')}\n"
-                f"- Caller: {get_value('caller_id')}\n"
-                f"- Created On: {get_value('sys_created_on')}"
-            )
-            
-            # LOG 4: Entire tool finished
-            total_tool_time = time.time() - tool_start_time
-            logger.info(f"🏁 Tool '{self.name}' completed in: {total_tool_time:.2f} seconds")
-            
-            return formatted_result
+            return result
             
         except requests.exceptions.Timeout:
-            # LOG 5: Timeout occurred
             api_time = time.time() - api_start_time
-            logger.error(f"⏰ SERVICE NOW API TIMEOUT after {api_time:.2f}s for {incident_number}")
-            return f"Error: The request to ServiceNow timed out after {api_time:.2f}s while fetching {incident_number}."
+            logger.error(f"⏰ Timeout after {api_time:.2f}s")
+            return f"Error: Request timed out after {api_time:.2f} seconds."
             
         except requests.exceptions.HTTPError as err:
             api_time = time.time() - api_start_time
-            logger.error(f"❌ HTTP error after {api_time:.2f}s: {err}")
-            return f"An HTTP error occurred: {err}"
+            logger.error(f"❌ HTTP error: {err}")
+            if err.response.status_code == 404:
+                return f"Incident {incident_number} not found."
+            return f"HTTP error: {err}"
+            
         except Exception as e:
             api_time = time.time() - api_start_time
-            logger.error(f"🔥 Unexpected error after {api_time:.2f}s: {e}")
-            return f"An unexpected error occurred: {e}"
+            logger.error(f"🔥 Unexpected error: {e}")
+            return f"Error: {str(e)}"
+
+    def _format_human_readable(self, incident_data: Dict[str, Any], fields: List[str], verbose: bool) -> str:
+        """Clean human-readable format"""
+        lines = [f"📋 **Incident Details**", ""]
+        
+        for field in fields:
+            if field in incident_data:
+                display_name = self.FIELD_DISPLAY_NAMES.get(field, field.replace('_', ' ').title())
+                value = self._get_display_value(incident_data[field], field)
+                
+                if value and value != 'N/A':
+                    lines.append(f"• **{display_name}**: {value}")
+        
+        return "\n".join(lines)
+
+    def _format_minimal(self, incident_data: Dict[str, Any]) -> str:
+        """Minimal format for quick overview"""
+        number = self._get_display_value(incident_data.get('number'), 'number')
+        description = self._get_display_value(incident_data.get('short_description'), 'short_description')
+        state = self._get_display_value(incident_data.get('state'), 'state')
+        
+        return f"{number}: {description} | {state}"
+
+    def _get_display_value(self, field_data: Any, field_name: str) -> str:
+        """Extract display value safely"""
+        if field_data is None:
+            return 'N/A'
+        
+        if isinstance(field_data, dict):
+            return field_data.get('display_value', 'N/A')
+        
+        # Apply special formatting
+        if field_name == 'state':
+            return self.STATE_MAP.get(str(field_data), f"Unknown ({field_data})")
+        
+        if field_name == 'priority':
+            return self.PRIORITY_MAP.get(str(field_data), f"Unknown ({field_data})")
+        
+        return str(field_data) if field_data else 'N/A'
+
+    def _arun(self, incident_number: str, include_fields: Optional[List[str]] = None,
+              verbose: bool = False, format: str = "human"):
+        raise NotImplementedError()  
+
+
 class SearchIncidentsInput(BaseModel):
     search_term: str = Field(description="Keyword or phrase to search for in incident short descriptions.")
-
 class SearchIncidentsTool(BaseTool):
     name: str = "search_incidents"
     description: str = "Use this tool to search for incidents by a keyword. Returns a list of matching incidents."
@@ -201,8 +304,6 @@ class SearchIncidentsTool(BaseTool):
 
     def _arun(self, search_term: str): 
         raise NotImplementedError()
-
-
 
 class CreateIncidentInput(BaseModel):
     short_description: str = Field(description="A brief summary of the issue for the new incident.")
@@ -330,7 +431,6 @@ class SearchKnowledgeBaseInput(BaseModel):
         default=None,
         description="An optional category name to filter the search results. Use this for more precise searches, e.g., 'IT', 'HR', etc."
     )
-
 class SearchKnowledgeBaseTool(BaseTool):
     name: str = "search_knowledge_base"
     description: str = "Searches the ServiceNow knowledge base for articles. Use this tool for technical questions, how-tos, or any information about internal processes. " \
@@ -412,7 +512,6 @@ class SearchKnowledgeBaseTool(BaseTool):
     def _arun(self, **kwargs):
         """Asynchronous run is not implemented for this tool."""
         raise NotImplementedError()
-
 
 class DeleteIncidentInput(BaseModel):
     incident_number: str = Field(description="The incident number to delete, e.g., 'INC0010001'.")

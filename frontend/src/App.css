@@ -38,8 +38,10 @@ body {
   margin: 0;
 }
 
+/* Inline code inside bot messages (if any) */
 .message.bot code {
-  background: #eee;
+  background: #e9ecef;     /* Dark background for inline code */
+  color: #212529;
   padding: 2px 4px;
   border-radius: 4px;
   font-size: 0.9em;
@@ -47,8 +49,8 @@ body {
 }
 
 .message.bot pre {
-  background: #2d2d2d;
-  color: #f8f8f2;
+  background: #e9ecef;
+  color: #212529;
   padding: 10px;
   border-radius: 8px;
   overflow-x: auto;
