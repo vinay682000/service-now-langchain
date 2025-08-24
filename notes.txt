@@ -4,6 +4,11 @@ n> python -m uvicorn main:app --reload
 cd frontend
 npm run dev
 
+
+npm install react-markdown remark-gfm prop-types
+npm install    
+npm run build
+
 pip install langchain requests uvicorn dotenv fastapi langchain_nvidia_ai_endpoints
 
 Of course. Here is a comprehensive list of prompts designed to test the full range of our agent's capabilities, from simple commands to complex, multi-step conversations.

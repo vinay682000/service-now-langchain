@@ -445,11 +445,13 @@ class DeleteIncidentTool(BaseTool):
 class ResolveIncidentInput(BaseModel):
     incident_number: str = Field(description="The incident number to resolve, e.g., 'INC0010001'.")
     resolution_note: str = Field(description="A brief description of the solution or resolution.")
+    close_code: str = Field(description="The close code. Valid values: Duplicate, Known error, No resolution provided, Resolved by caller, Resolved by change, Resolved by problem, Resolved by request, Solution provided, Workaround provided, User error")
 class ResolveIncidentTool(BaseTool):
     name: str = "resolve_incident"
-    description: str = "Use this tool to resolve and close an incident ticket. Requires a resolution note."
+    description: str = "Use this tool to resolve and close an incident ticket. Requires a resolution note and close code."
     args_schema: Type[BaseModel] = ResolveIncidentInput
-    def _run(self, incident_number: str, resolution_note: str):
+
+    def _run(self, incident_number: str, resolution_note: str, close_code: str = "Solution provided"):
         instance, user, pwd = get_servicenow_credentials()
         if not instance: 
             return "ServiceNow credentials not configured."
@@ -457,19 +459,36 @@ class ResolveIncidentTool(BaseTool):
         if not incident_sys_id: 
             return f"Could not find incident {incident_number} to resolve."
         url = f"{instance}/api/now/table/incident/{incident_sys_id}"
-        payload = {"state": "6", "resolution_notes": resolution_note}  # '6' is the out-of-the-box value for 'Resolved' state
-        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        
+        # CORRECT PAYLOAD - using close_code instead of resolution_code
+        payload = {
+            "state": "6",
+            "resolution_notes": resolution_note,
+            "close_notes": resolution_note,
+            "close_code": close_code  # This is the mandatory field
+        }
+        
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}      
         try:
             response = requests.patch(url, auth=(user, pwd), headers=headers, json=payload)
             response.raise_for_status()
-            return f"Successfully resolved incident {incident_number} with the note: '{resolution_note}'."
-        #except Exception as e: return f"An error occurred while resolving the incident: {e}"
+            return f"Successfully resolved incident {incident_number} with close code '{close_code}' and note: '{resolution_note}'."
+        
         except requests.exceptions.HTTPError as err:
-            return f"An HTTP error occurred while resolving the incident: {err}. Please check user permissions."
+            if err.response.status_code == 400:
+                error_detail = err.response.json().get('error', {}).get('detail', 'Unknown error')
+                return f"Validation error: {error_detail}"
+            elif err.response.status_code == 403:
+                return f"Permission denied: {err}"
+            else:
+                return f"HTTP error occurred: {err}"
+        
         except Exception as e:
-            return f"An unexpected error occurred while resolving the incident: {e}"
-    def _arun(self, incident_number: str, resolution_note: str): raise NotImplementedError()
-
+            return f"An unexpected error occurred: {e}"
+    
+    def _arun(self, incident_number: str, resolution_note: str, close_code: str = "Solution provided"):
+        raise NotImplementedError()
+        
 class AssignIncidentInput(BaseModel):
     incident_number: str = Field(description="The incident number to assign, e.g., 'INC0010001'.")
     assign_to_user: Optional[str] = Field(description="The full name of the user to assign the incident to.")
@@ -525,120 +544,517 @@ class AssignIncidentTool(BaseTool):
     def _arun(self, incident_number: str, assign_to_user: Optional[str] = None, assign_to_group: Optional[str] = None): raise NotImplementedError()
 
 class GetIncidentMetricsInput(BaseModel):
-    group_name: str = Field(description="The name of the assignment group to get metrics for, e.g., 'Software'.")
+    group_name: str = Field(description="The name of the assignment group, e.g., 'Hardware', 'Software', 'Network'.")
+    timeframe: Optional[str] = Field(
+        default="last 30 days",
+        description="Time period for metrics. Examples: 'last 7 days', 'this month', 'last quarter', 'last 90 days', '2024-01-01 to 2024-01-31'. Default: 'last 30 days'"
+    )
+    metric_type: Optional[str] = Field(
+        default="average",
+        description="Type of metric to calculate. Options: 'average', 'median', 'min', 'max', 'all'. Default: 'average'"
+    )
+    resolution_state: Optional[str] = Field(
+        default="6",
+        description="Which resolved state to consider. '6' (Resolved) or '7' (Closed). Default: '6'"
+    )
+    include_breakdown: Optional[bool] = Field(
+        default=False,
+        description="Whether to include breakdown by priority or category. Default: False"
+    )
+
+    @validator('timeframe')
+    def validate_timeframe(cls, v):
+        if v and not any(keyword in v.lower() for keyword in ['day', 'month', 'quarter', 'year', 'to', '-']):
+            raise ValueError("Timeframe should contain time references like 'days', 'month', or date range")
+        return v
+
+    @validator('metric_type')
+    def validate_metric_type(cls, v):
+        valid_types = ['average', 'median', 'min', 'max', 'all']
+        if v.lower() not in valid_types:
+            raise ValueError(f"Metric type must be one of: {', '.join(valid_types)}")
+        return v.lower()
+
+    @validator('resolution_state')
+    def validate_resolution_state(cls, v):
+        if v not in ['6', '7']:
+            raise ValueError("Resolution state must be '6' (Resolved) or '7' (Closed)")
+        return v
 class GetIncidentMetricsTool(BaseTool):
     name: str = "get_incident_metrics"
-    description: str = "Use this tool to get average resolution time for incidents assigned to a specific group."
+    description: str = "Use this tool to get resolution time metrics for incidents assigned to a specific group. Can calculate average, median, min, max resolution times with various filters and timeframes."
     args_schema: Type[BaseModel] = GetIncidentMetricsInput
-    def _run(self, group_name: str):
+
+    def _run(self, group_name: str, timeframe: str = "last 30 days", 
+             metric_type: str = "average", resolution_state: str = "6",
+             include_breakdown: bool = False):
+        
         instance, user, pwd = get_servicenow_credentials()
         if not instance: 
             return "ServiceNow credentials not configured."
+        
+        # Get group SYS_ID
         group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
         if not group_sys_id: 
             return f"Could not find an assignment group named '{group_name}'."
-        url = f"{instance}/api/now/stats/incident"
-        params = {"sysparm_query": f"assignment_group={group_sys_id}", "sysparm_count": "true", "sysparm_fields": "resolved_at", "sysparm_group_by": "assignment_group"}
+        
+        # Build the query
+        base_query = f"assignment_group={group_sys_id}^state={resolution_state}"
+        
+        # Add timeframe filter
+        timeframe_query = self._parse_timeframe(timeframe)
+        if timeframe_query:
+            base_query += f"^{timeframe_query}"
+        
+        # Get all resolved incidents with timing data
+        url = f"{instance}/api/now/table/incident"
+        params = {
+            "sysparm_query": base_query,
+            "sysparm_fields": "number,opened_at,resolved_at,closed_at,sys_created_on,priority,category,severity",
+            "sysparm_limit": "1000"  # Increased limit for better metrics
+        }
         headers = {"Accept": "application/json"}
+        
         try:
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
+            
             results = response.json().get("result", [])
-            if not results: 
-                return f"No metrics found for group '{group_name}'."
-            resolved_incidents = [item for item in results if item.get('resolved_at')]
-            if not resolved_incidents: 
-                return f"No resolved incidents found for group '{group_name}' to calculate metrics."
-            total_duration = 0
-            count = 0
-            for item in resolved_incidents:
-                created_at_str = item.get('sys_created_on')
-                resolved_at_str = item.get('resolved_at')
-                if created_at_str and resolved_at_str:
-                    created_at = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S')
-                    resolved_at = datetime.strptime(resolved_at_str, '%Y-%m-%d %H:%M:%S')
-                    duration = resolved_at - created_at
-                    total_duration += duration.total_seconds()
-                    count += 1
-            if count == 0: 
-                return f"Could not calculate metrics for group '{group_name}' due to missing data."
-            avg_duration_seconds = total_duration / count
-            avg_duration_minutes = avg_duration_seconds / 60
-            avg_duration_hours = avg_duration_minutes / 60
-            return f"Average time to resolve incidents for '{group_name}' is approximately {avg_duration_hours:.2f} hours."
+            
+            if not results:
+                return self._build_no_results_message(group_name, timeframe, resolution_state)
+            
+            # Calculate resolution times
+            resolution_times = self._calculate_resolution_times(results)
+            
+            if not resolution_times:
+                return f"No incidents with complete timing data found for '{group_name}' group in {timeframe}."
+            
+            # Generate metrics based on requested type
+            return self._generate_metrics_report(resolution_times, group_name, timeframe, 
+                                               metric_type, resolution_state, include_breakdown, results)
+            
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 403:
+                return f"Permission denied while fetching metrics for group '{group_name}'. Please check user permissions."
+            else:
+                return f"HTTP error occurred while fetching metrics: {err}"
         except Exception as e:
-            return f"An error occurred while fetching metrics: {e}"
-    def _arun(self, group_name: str): raise NotImplementedError()
+            return f"An unexpected error occurred while fetching metrics: {e}"
 
-# Insert this class definition into the "3. ServiceNow Custom Tool Definitions" section
-class CountIncidentsForGroupInput(BaseModel):
-    group_name: str = Field(description="The name of the assignment group, e.g., 'Hardware'.")
-
-class CountIncidentsForGroupTool(BaseTool):
-    name: str = "count_incidents_for_group"
-    description: str = "Use this tool to get the total number of incidents for a specific assignment group."
-    args_schema: Type[BaseModel] = CountIncidentsForGroupInput
-
-    def _run(self, group_name: str):
-        instance, user, pwd = get_servicenow_credentials()
-        if not instance: 
-            return "ServiceNow credentials not configured."
-        group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
-        if not group_sys_id: 
-            return f"Could not find an assignment group named '{group_name}'."
+    def _parse_timeframe(self, timeframe: str) -> str:
+        """Convert natural language timeframe to ServiceNow query"""
+        timeframe = timeframe.lower()
         
-        url = f"{instance}/api/now/stats/incident"
-        params = {"sysparm_count": "true", "sysparm_query": f"assignment_group={group_sys_id}"}
-        headers = {"Accept": "application/json"}
+        time_mappings = {
+            "last 7 days": "sys_created_on>=javascript:gs.daysAgoStart(7)^sys_created_on<=javascript:gs.daysAgoEnd(0)",
+            "last 30 days": "sys_created_on>=javascript:gs.daysAgoStart(30)^sys_created_on<=javascript:gs.daysAgoEnd(0)",
+            "last 90 days": "sys_created_on>=javascript:gs.daysAgoStart(90)^sys_created_on<=javascript:gs.daysAgoEnd(0)",
+            "this month": "sys_created_on>=javascript:gs.beginningOfThisMonth()^sys_created_on<=javascript:gs.endOfThisMonth()",
+            "last month": "sys_created_on>=javascript:gs.beginningOfLastMonth()^sys_created_on<=javascript:gs.endOfLastMonth()",
+            "this quarter": "sys_created_on>=javascript:gs.beginningOfThisQuarter()^sys_created_on<=javascript:gs.endOfThisQuarter()",
+            "last quarter": "sys_created_on>=javascript:gs.beginningOfLastQuarter()^sys_created_on<=javascript:gs.endOfLastQuarter()"
+        }
         
-        try:
-            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
-            response.raise_for_status()
-            count = response.json().get("result", {}).get("stats", {}).get("count", "0")
-            return f"There are {count} incidents for the '{group_name}' assignment group."
-        except Exception as e:
-            return f"An error occurred while counting incidents: {e}"
+        if timeframe in time_mappings:
+            return time_mappings[timeframe]
+        elif "to" in timeframe or "-" in timeframe:
+            dates = timeframe.split(" to ") if " to " in timeframe else timeframe.split("-")
+            if len(dates) == 2:
+                start_date, end_date = dates[0].strip(), dates[1].strip()
+                return f"sys_created_on>={start_date}^sys_created_on<={end_date}"
+        
+        return ""
 
-    def _arun(self, group_name: str):
+    def _calculate_resolution_times(self, incidents: List[dict]) -> List[float]:
+        """Calculate resolution times in hours for all incidents"""
+        resolution_times = []
+        
+        for incident in incidents:
+            # Try different timestamp field combinations
+            start_time = incident.get('opened_at') or incident.get('sys_created_on')
+            end_time = incident.get('resolved_at') or incident.get('closed_at')
+            
+            if start_time and end_time:
+                try:
+                    # Parse timestamps (adjust format based on your ServiceNow)
+                    start_dt = datetime.strptime(start_time, '%Y-%m-%d %H:%M:%S')
+                    end_dt = datetime.strptime(end_time, '%Y-%m-%d %H:%M:%S')
+                    
+                    # Calculate duration in hours
+                    duration_hours = (end_dt - start_dt).total_seconds() / 3600
+                    resolution_times.append(duration_hours)
+                    
+                except ValueError:
+                    # Handle different date formats if needed
+                    continue
+        
+        return resolution_times
+
+    def _generate_metrics_report(self, resolution_times: List[float], group_name: str,
+                                timeframe: str, metric_type: str, resolution_state: str,
+                                include_breakdown: bool, all_incidents: List[dict]) -> str:
+        """Generate comprehensive metrics report"""
+        
+        # Calculate all statistics
+        stats = {
+            'average': sum(resolution_times) / len(resolution_times),
+            'median': sorted(resolution_times)[len(resolution_times) // 2],
+            'min': min(resolution_times),
+            'max': max(resolution_times),
+            'count': len(resolution_times),
+            'total_incidents': len(all_incidents)
+        }
+        
+        # Build the report
+        report = [
+            f"📊 Resolution Metrics for '{group_name}' Group",
+            f"• Timeframe: {timeframe}",
+            f"• Resolution State: {'Resolved (6)' if resolution_state == '6' else 'Closed (7)'}",
+            f"• Incidents Analyzed: {stats['count']} of {stats['total_incidents']} total",
+            ""
+        ]
+        
+        # Add requested metrics
+        if metric_type == 'all':
+            report.extend([
+                f"⏱️  Average Resolution Time: {stats['average']:.1f} hours",
+                f"📈 Median Resolution Time: {stats['median']:.1f} hours", 
+                f"⚡ Fastest Resolution: {stats['min']:.1f} hours",
+                f"🐢 Slowest Resolution: {stats['max']:.1f} hours"
+            ])
+        else:
+            metric_titles = {
+                'average': 'Average Resolution Time',
+                'median': 'Median Resolution Time', 
+                'min': 'Fastest Resolution Time',
+                'max': 'Slowest Resolution Time'
+            }
+            report.append(f"⏱️  {metric_titles[metric_type]}: {stats[metric_type]:.1f} hours")
+        
+        # Add breakdown if requested
+        if include_breakdown:
+            breakdown = self._generate_breakdown(all_incidents, resolution_times)
+            if breakdown:
+                report.extend(["", "📋 Breakdown:", breakdown])
+        
+        return "\n".join(report)
+
+    def _generate_breakdown(self, incidents: List[dict], resolution_times: List[float]) -> str:
+        """Generate breakdown by priority or category"""
+        # Implement breakdown logic based on available data
+        return "Breakdown feature coming soon. Use include_breakdown=True to enable."
+
+    def _build_no_results_message(self, group_name: str, timeframe: str, resolution_state: str) -> str:
+        """Build message when no incidents found"""
+        state_name = "Resolved" if resolution_state == "6" else "Closed"
+        return f"No {state_name.lower()} incidents found for '{group_name}' group in {timeframe}."
+
+    def _arun(self, group_name: str, timeframe: str = "last 30 days", 
+              metric_type: str = "average", resolution_state: str = "6",
+              include_breakdown: bool = False):
         raise NotImplementedError()
 
-# Insert this class definition into the "3. ServiceNow Custom Tool Definitions" section
-class ListIncidentsForGroupInput(BaseModel):
-    group_name: str = Field(description="The name of the assignment group, e.g., 'Hardware'.")
-    limit: int = Field(description="The maximum number of incidents to return, e.g., 5.")
+class CountIncidentsForGroupInput(BaseModel):
+    group_name: str = Field(description="The name of the assignment group, e.g., 'Hardware', 'Software', 'Network'.")
+    state: Optional[str] = Field(
+        default=None, 
+        description="Filter by incident state. Examples: '1' (New), '2' (In Progress), '6' (Resolved), '7' (Closed). Leave empty for all states."
+    )
+    timeframe: Optional[str] = Field(
+        default=None,
+        description="Time period filter. Examples: 'last 7 days', 'this month', 'last quarter', '2024-01-01 to 2024-01-31'"
+    )
+    priority: Optional[str] = Field(
+        default=None,
+        description="Filter by priority. Examples: '1' (Critical), '2' (High), '3' (Moderate), '4' (Low), '5' (Planning)"
+    )
 
-class ListIncidentsForGroupTool(BaseTool):
-    name: str = "list_incidents_for_group"
-    description: str = "Use this tool to get a list of incidents assigned to a specific group."
-    args_schema: Type[BaseModel] = ListIncidentsForGroupInput
+    @validator('timeframe')
+    def validate_timeframe(cls, v):
+        if v and not any(keyword in v.lower() for keyword in ['day', 'month', 'quarter', 'year', 'to', '-']):
+            raise ValueError("Timeframe should contain time references like 'days', 'month', or date range 'yyyy-mm-dd to yyyy-mm-dd'")
+        return v
+class CountIncidentsForGroupTool(BaseTool):
+    name: str = "count_incidents_for_group"
+    description: str = "Use this tool to get the total number of incidents for a specific assignment group with optional filters for state, timeframe, and priority."
+    args_schema: Type[BaseModel] = CountIncidentsForGroupInput
 
-    def _run(self, group_name: str, limit: int = 10):
+    def _run(self, group_name: str, state: Optional[str] = None, 
+             timeframe: Optional[str] = None, priority: Optional[str] = None):
         instance, user, pwd = get_servicenow_credentials()
         if not instance: 
             return "ServiceNow credentials not configured."
+        
+        # Get group SYS_ID
         group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
         if not group_sys_id: 
-            return f"Could not find a group named '{group_name}'."
+            return f"Could not find an assignment group named '{group_name}'."
         
-        url = f"{instance}/api/now/table/incident"
-        params = {"sysparm_limit": str(limit), "sysparm_query": f"assignment_group={group_sys_id}", "sysparm_fields": "number,short_description,state"}
+        # Build the query
+        base_query = f"assignment_group={group_sys_id}"
+        
+        if state:
+            base_query += f"^state={state}"
+        
+        if priority:
+            base_query += f"^priority={priority}"
+        
+        # Handle timeframe
+        if timeframe:
+            timeframe_query = self._parse_timeframe(timeframe)
+            if timeframe_query:
+                base_query += f"^{timeframe_query}"
+        
+        url = f"{instance}/api/now/stats/incident"
+        params = {
+            "sysparm_count": "true", 
+            "sysparm_query": base_query
+        }
         headers = {"Accept": "application/json"}
         
         try:
             response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
             response.raise_for_status()
-            results = response.json().get("result", [])
-            if not results: 
-                return f"No incidents found for '{group_name}'."
             
-            formatted_results = [f"Found {len(results)} incidents for '{group_name}':"]
-            for item in results:
-                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
-            return "\n".join(formatted_results)
+            count = response.json().get("result", {}).get("stats", {}).get("count", "0")
+            
+            # Build informative response
+            response_text = f"There are {count} incidents"
+            if state:
+                response_text += f" in state '{state}'"
+            if timeframe:
+                response_text += f" from {timeframe}"
+            if priority:
+                response_text += f" with priority '{priority}'"
+            response_text += f" for the '{group_name}' assignment group."
+            
+            return response_text
+            
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 403:
+                return f"Permission denied while counting incidents for group '{group_name}'. Please check user permissions."
+            else:
+                return f"HTTP error occurred while counting incidents: {err}"
         except Exception as e:
-            return f"An error occurred while listing incidents: {e}"
-    
-    def _arun(self, group_name: str, limit: int = 10):
+            return f"An unexpected error occurred while counting incidents: {e}"
+
+    def _parse_timeframe(self, timeframe: str) -> str:
+        """Convert natural language timeframe to ServiceNow query"""
+        timeframe = timeframe.lower()
+        now = datetime.now()
+        
+        if "last 7 days" in timeframe:
+            return f"sys_created_on>=javascript:gs.daysAgoStart(7)^sys_created_on<=javascript:gs.daysAgoEnd(0)"
+        elif "last 30 days" in timeframe:
+            return f"sys_created_on>=javascript:gs.daysAgoStart(30)^sys_created_on<=javascript:gs.daysAgoEnd(0)"
+        elif "this month" in timeframe:
+            return f"sys_created_on>=javascript:gs.beginningOfThisMonth()^sys_created_on<=javascript:gs.endOfThisMonth()"
+        elif "last month" in timeframe:
+            return f"sys_created_on>=javascript:gs.beginningOfLastMonth()^sys_created_on<=javascript:gs.endOfLastMonth()"
+        elif "this quarter" in timeframe:
+            return f"sys_created_on>=javascript:gs.beginningOfThisQuarter()^sys_created_on<=javascript:gs.endOfThisQuarter()"
+        elif "to" in timeframe or "-" in timeframe:
+            # Handle date ranges like "2024-01-01 to 2024-01-31"
+            dates = timeframe.split(" to ") if " to " in timeframe else timeframe.split("-")
+            if len(dates) == 2:
+                start_date, end_date = dates[0].strip(), dates[1].strip()
+                return f"sys_created_on>={start_date}^sys_created_on<={end_date}"
+        
+        return ""
+
+    def _arun(self, group_name: str, state: Optional[str] = None, 
+              timeframe: Optional[str] = None, priority: Optional[str] = None):
+        raise NotImplementedError()
+
+class ListIncidentsForGroupInput(BaseModel):
+    group_name: str = Field(description="The name of the assignment group, e.g., 'Hardware', 'Software', 'Network'.")
+    limit: int = Field(default=5, description="The maximum number of incidents to return. Default is 5, maximum is 50.")
+    state: Optional[str] = Field(
+        default=None, 
+        description="Filter by incident state. Examples: '1' (New), '2' (In Progress), '6' (Resolved), '7' (Closed). Leave empty for all states."
+    )
+    timeframe: Optional[str] = Field(
+        default=None,
+        description="Time period filter. Examples: 'last 7 days', 'this month', 'last 30 days', '2024-01-01 to 2024-01-31'"
+    )
+    priority: Optional[str] = Field(
+        default=None,
+        description="Filter by priority. Examples: '1' (Critical), '2' (High), '3' (Moderate), '4' (Low), '5' (Planning)"
+    )
+    sort_by: Optional[str] = Field(
+        default="newest",
+        description="Sort order. Options: 'newest', 'oldest', 'priority_high', 'priority_low'. Default is 'newest'."
+    )
+    show_fields: Optional[List[str]] = Field(
+        default_factory=lambda: ["number", "short_description", "state", "priority", "opened_at"],
+        description="List of fields to include. Available: number, short_description, state, priority, opened_at, resolved_at, assignment_group, assigned_to, category, severity"
+    )
+
+    @validator('limit')
+    def validate_limit(cls, v):
+        if v > 50:
+            raise ValueError("Limit cannot exceed 50 incidents for performance reasons.")
+        if v < 1:
+            raise ValueError("Limit must be at least 1.")
+        return v
+
+    @validator('timeframe')
+    def validate_timeframe(cls, v):
+        if v and not any(keyword in v.lower() for keyword in ['day', 'month', 'quarter', 'year', 'to', '-']):
+            raise ValueError("Timeframe should contain time references like 'days', 'month', or date range")
+        return v
+class ListIncidentsForGroupTool(BaseTool):
+    name: str = "list_incidents_for_group"
+    description: str = "Use this tool to get a list of incidents assigned to a specific group with various filtering, sorting, and field selection options."
+    args_schema: Type[BaseModel] = ListIncidentsForGroupInput
+
+    def _run(self, group_name: str, limit: int = 5, state: Optional[str] = None,
+             timeframe: Optional[str] = None, priority: Optional[str] = None,
+             sort_by: str = "newest", show_fields: Optional[List[str]] = None):
+        
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: 
+            return "ServiceNow credentials not configured."
+        
+        # Get group SYS_ID
+        group_sys_id = get_sys_id(instance, user, pwd, "sys_user_group", "name", group_name)
+        if not group_sys_id: 
+            return f"Could not find an assignment group named '{group_name}'."
+        
+        # Build the query
+        base_query = f"assignment_group={group_sys_id}"
+        
+        if state:
+            base_query += f"^state={state}"
+        
+        if priority:
+            base_query += f"^priority={priority}"
+        
+        # Handle timeframe
+        if timeframe:
+            timeframe_query = self._parse_timeframe(timeframe)
+            if timeframe_query:
+                base_query += f"^{timeframe_query}"
+        
+        # Build fields parameter
+        default_fields = ["number", "short_description", "state", "priority", "opened_at"]
+        fields_to_show = show_fields if show_fields else default_fields
+        fields_param = ",".join(fields_to_show)
+        
+        # Build orderby parameter
+        order_mapping = {
+            "newest": "opened_at DESC",
+            "oldest": "opened_at ASC", 
+            "priority_high": "priority ASC,opened_at DESC",
+            "priority_low": "priority DESC,opened_at DESC"
+        }
+        orderby_param = order_mapping.get(sort_by, "opened_at DESC")
+        
+        url = f"{instance}/api/now/table/incident"
+        params = {
+            "sysparm_query": base_query,
+            "sysparm_fields": fields_param,
+            "sysparm_limit": str(limit),
+            "sysparm_orderby": orderby_param
+        }
+        headers = {"Accept": "application/json"}
+        
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            
+            results = response.json().get("result", [])
+            
+            if not results:
+                return self._build_no_results_message(group_name, state, timeframe, priority)
+            
+            return self._format_results(results, group_name, len(results), state, timeframe, priority, fields_to_show)
+            
+        except requests.exceptions.HTTPError as err:
+            if err.response.status_code == 403:
+                return f"Permission denied while listing incidents for group '{group_name}'. Please check user permissions."
+            else:
+                return f"HTTP error occurred while listing incidents: {err}"
+        except Exception as e:
+            return f"An unexpected error occurred while listing incidents: {e}"
+
+    def _parse_timeframe(self, timeframe: str) -> str:
+        """Convert natural language timeframe to ServiceNow query"""
+        timeframe = timeframe.lower()
+        
+        if "last 7 days" in timeframe:
+            return "sys_created_on>=javascript:gs.daysAgoStart(7)^sys_created_on<=javascript:gs.daysAgoEnd(0)"
+        elif "last 30 days" in timeframe:
+            return "sys_created_on>=javascript:gs.daysAgoStart(30)^sys_created_on<=javascript:gs.daysAgoEnd(0)"
+        elif "this month" in timeframe:
+            return "sys_created_on>=javascript:gs.beginningOfThisMonth()^sys_created_on<=javascript:gs.endOfThisMonth()"
+        elif "last month" in timeframe:
+            return "sys_created_on>=javascript:gs.beginningOfLastMonth()^sys_created_on<=javascript:gs.endOfLastMonth()"
+        elif "to" in timeframe or "-" in timeframe:
+            dates = timeframe.split(" to ") if " to " in timeframe else timeframe.split("-")
+            if len(dates) == 2:
+                start_date, end_date = dates[0].strip(), dates[1].strip()
+                return f"sys_created_on>={start_date}^sys_created_on<={end_date}"
+        
+        return ""
+
+    def _build_no_results_message(self, group_name: str, state: Optional[str], 
+                                 timeframe: Optional[str], priority: Optional[str]) -> str:
+        """Build informative message when no incidents found"""
+        message = f"No incidents found for '{group_name}' group"
+        
+        filters = []
+        if state:
+            filters.append(f"state '{state}'")
+        if timeframe:
+            filters.append(f"timeframe '{timeframe}'")
+        if priority:
+            filters.append(f"priority '{priority}'")
+        
+        if filters:
+            message += f" with filters: {', '.join(filters)}"
+        
+        return message + "."
+
+    def _format_results(self, results: List[dict], group_name: str, count: int,
+                       state: Optional[str], timeframe: Optional[str], 
+                       priority: Optional[str], fields: List[str]) -> str:
+        """Format the results in a readable way"""
+        
+        # Build header
+        header = f"Found {count} incidents for '{group_name}' group"
+        filters = []
+        if state:
+            filters.append(f"state '{state}'")
+        if timeframe:
+            filters.append(f"timeframe '{timeframe}'")
+        if priority:
+            filters.append(f"priority '{priority}'")
+        
+        if filters:
+            header += f" (filters: {', '.join(filters)})"
+        
+        formatted_results = [header + ":"]
+        
+        # Format each incident
+        for i, incident in enumerate(results, 1):
+            incident_lines = [f"{i}. {incident.get('number', 'N/A')}:"]
+            
+            for field in fields:
+                if field != 'number' and field in incident:
+                    value = incident[field]
+                    if value:  # Only show non-empty fields
+                        field_display = field.replace('_', ' ').title()
+                        incident_lines.append(f"   • {field_display}: {value}")
+            
+            formatted_results.append("\n".join(incident_lines))
+        
+        return "\n\n".join(formatted_results)
+
+    def _arun(self, group_name: str, limit: int = 5, state: Optional[str] = None,
+              timeframe: Optional[str] = None, priority: Optional[str] = None,
+              sort_by: str = "newest", show_fields: Optional[List[str]] = None):
         raise NotImplementedError()
 
 class GetMultipleIncidentsInput(BaseModel):
@@ -783,8 +1199,12 @@ app.add_middleware(
     allow_origins=[
         "https://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev",
         "http://studious-bassoon-xx7vwvqxq7jcvv4g-5173.app.github.dev",
+        "https://studious-bassoon-xx7vwvqxq7jcvv4g-5174.app.github.dev",
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-5174.app.github.dev",
         "https://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev",
-        "http://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev"
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-8000.app.github.dev",
+        "https://studious-bassoon-xx7vwvqxq7jcvv4g-3000.app.github.dev",
+        "http://studious-bassoon-xx7vwvqxq7jcvv4g-3000.app.github.dev"
     ],
     allow_credentials=True,
     allow_methods=["POST", "OPTIONS", "GET"],  # Explicitly specify needed methods
