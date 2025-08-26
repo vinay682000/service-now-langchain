@@ -1,0 +1,148 @@
+pip install langchain-nvidia-ai-endpoints
+pip install -r requirements.txt
+
+
+source .venv/bin/activate
+python -m uvicorn main:app --reload
+python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+cd frontend
+npm run dev
+
+#to know the pid of the application that is running named python and kill it
+
+ps aux | grep python
+kill -9 14256
+
+npm install react-markdown remark-gfm prop-types
+npm install    
+npm run build
+
+pip install langchain requests uvicorn dotenv fastapi langchain_nvidia_ai_endpoints
+
+Of course. Here is a comprehensive list of prompts designed to test the full range of our agent's capabilities, from simple commands to complex, multi-step conversations.
+
+---
+
+### **Test Suite for ServiceNow Agent**
+
+#### **Category 1: `get_incident_details` (Fetching Specific Tickets)**
+
+* **Direct & Simple:**
+    * `"What is the status of INC0000001?"`
+    * `"Details for INC0000002."`
+    * `"lookup INC0000003"`
+
+* **Conversational:**
+    * `"Can you tell me what's happening with ticket INC0000004?"`
+    * `"I need an update on INC0000005 please."`
+    * `"What was the resolution for INC0000006?"`
+
+* **Edge Case (Non-existent Ticket):**
+    * `"Fetch details for INC9999999."` (Should respond that it can't be found).
+
+#### **Category 2: `search_incidents` (Searching by Keyword)**
+
+* **Direct & Simple:**
+    * `"Search incidents for 'email'."`
+    * `"Find tickets about 'VPN'."`
+    * `"Show me incidents with the word 'printer'."`
+
+* **Conversational:**
+    * `"Are there any incidents related to network issues?"`
+    * `"I remember a ticket about a password reset, can you find it?"`
+
+#### **Category 3: `create_incident` (Creating New Tickets)**
+
+* **Direct & Simple:**
+    * `"Create incident: My mouse is broken."`
+    * `"New ticket: Cannot access the shared drive."`
+
+* **Conversational:**
+    * `"I need to open a ticket, my monitor is flickering."`
+    * `"Can you please create a new incident for me? The Wi-Fi in the conference room is not working."`
+
+#### **Category 4: `update_incident` (Adding Notes to Tickets)**
+
+* **Direct & Simple:**
+    * `"Update INC0000001 with note: User has rebooted their machine."`
+    * `"Add work note to INC0000002: Awaiting vendor response."`
+
+* **Conversational:**
+    * `"Please add a comment to ticket INC0000003, the user confirmed the issue is resolved."`
+
+#### **Category 5: `list_open_incidents_for_caller` (Finding Tickets Reported By a User)**
+
+* **Direct & Simple:**
+    * `"List open incidents for Abel Tuter."`
+    * `"Show open tickets for Beth Anglin."`
+
+* **Conversational:**
+    * `"What tickets has David Loo reported that are still open?"`
+    * `"Does Abel Tuter have any outstanding issues?"`
+
+#### **Category 6: `list_incidents_assigned_to_user` (Finding Tickets Assigned To a User)**
+
+* **Direct & Simple:**
+    * `"List incidents assigned to David Loo."`
+    * `"Show all tickets for David Loo."`
+
+* **Conversational:**
+    * `"What is David Loo working on?"`
+    * `"Can you show me all the tickets, open or closed, that are assigned to David Loo?"`
+
+#### **Category 7: `search_knowledge_base` (Getting Help)**
+
+* **Direct & Simple:**
+    * `"Search KB for 'password reset'."`
+    * `"Find knowledge articles about 'VPN setup'."`
+
+* **Conversational:**
+    * `"How do I connect to the office Wi-Fi?"`
+    * `"I need help setting up my email on my new phone, can you find an article for that?"`
+
+#### **Category 8: Testing Memory and Follow-up Questions**
+
+This is the most important test. Try this exact sequence of prompts:
+
+1.  **Initial Prompt:** `"Show me details for INC0000001."`
+2.  **Follow-up 1:** `"Who is the caller for that ticket?"` (Tests if it remembers "that ticket" is INC0000001).
+3.  **Follow-up 2:** `"Please add a note to it saying 'I have contacted the user for more information'."` (Tests if it still remembers "it" is INC0000001).
+4.  **Context Switch:** `"Now, what about INC0000002?"`
+5.  **Follow-up 3:** `"Can you search for any other tickets related to 'email'?"` (Tests if it can switch from a specific task to a general one).
+
+Running through these prompts will give you a very clear picture of the agent's intelligence, its ability to use its tools, and its capacity to hold a natural conversation.
+
+_____
+
+Endpoints involved in the code :
+1.GetIncidentInput - Use this tool to get details for a specific incident ticket.
+2. SearchIncidentsInput - Keyword or phrase to search for in incident short descriptions.
+3. CreateIncidentInput - A brief summary of the issue for the new incident.
+4. UpdateIncidentInput - Use this tool to add a work note or comment to an existing incident.
+5. ListOpenIncidentsForUserInput - use this tool to list all OPEN incidents reported by a specific user (caller).
+6. ListIncidentsAssignedToUserInput - Use this tool to find all incidents (open or closed) assigned to a specific user.
+
+7. SearchKnowledgeBaseInput - Use this tool to search for helpful articles in the ServiceNow knowledge base.
+8. 
+
+
+
+Requirements
+
+what are the todays priority 2 tickets?
+what is the resolution for xyz ticket ?
+number of opened tickets count ?
+number of closed tickets count ?
+
+when i asked some x month or weeks or days report , then the monthly report should contain a bar graph(two bars - one is green(resolved) and other is red (created tickets) )
+along with the report we need an excel sheet that includes all of those tickets details 
+
+example 6 months, 10 days, from x to y days, 3 weeks etc 
+
+
+
+-- need to make three different files python files
+1. tools
+2. main.py
+3. LLM code - so that i can change the code for azure openAI or llama or gemini etc exc
+

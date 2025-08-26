@@ -1,0 +1,316 @@
+#code for azure openAI
+# File: main.py
+# Description: An advanced multi-tool agent for ServiceNow.
+# (ADDED: Conversational memory to handle follow-up questions)
+
+import uvicorn
+import os
+import requests
+from dotenv import load_dotenv
+from typing import Type, List
+from pydantic import BaseModel, Field
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# --- LangChain Imports ---
+from langchain_openai import AzureChatOpenAI
+from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.tools import BaseTool
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain.memory import ConversationBufferWindowMemory # <-- ADDED FOR MEMORY
+
+# --- 1. Load Environment Variables ---
+load_dotenv()
+
+# --- 2. Helper Functions ---
+def get_servicenow_credentials():
+    instance = os.getenv("SERVICENOW_INSTANCE")
+    user = os.getenv("SERVICENOW_USERNAME")
+    pwd = os.getenv("SERVICENOW_PASSWORD")
+    if not all([instance, user, pwd]): return None, None, None
+    return instance, user, pwd
+
+def get_sys_id(instance, user, pwd, table, query_field, query_value):
+    url = f"{instance}/api/now/table/{table}"
+    params = {"sysparm_query": f"{query_field}={query_value}", "sysparm_limit": "1", "sysparm_fields": "sys_id"}
+    headers = {"Accept": "application/json"}
+    try:
+        response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+        response.raise_for_status()
+        results = response.json().get("result", [])
+        if results: return results[0]['sys_id']
+    except Exception as e: print(f"Error getting sys_id: {e}")
+    return None
+
+# --- 3. ServiceNow Custom Tool Definitions ---
+class GetIncidentInput(BaseModel):
+    incident_number: str = Field(description="The full incident number, e.g., 'INC0010001'.")
+class GetIncidentTool(BaseTool):
+    name: str = "get_incident_details"
+    description: str = "Use this tool to get details for a specific incident ticket."
+    args_schema: Type[BaseModel] = GetIncidentInput
+    def _run(self, incident_number: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        url = f"{instance}/api/now/table/incident"
+        params = {"sysparm_query": f"number={incident_number}", "sysparm_limit": "1", "sysparm_fields": "number,short_description,description,state,assignment_group,caller_id"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("result", [])
+            if not isinstance(results, list) or not results: return f"No incident found with the number {incident_number}."
+            incident_data = results[0]
+            if not isinstance(incident_data, dict): return f"No valid incident data found for {incident_number}."
+            def get_display_value(data, key):
+                field_data = data.get(key)
+                if isinstance(field_data, dict): return field_data.get('display_value', 'N/A')
+                return 'N/A'
+            state_value = incident_data.get('state', 'N/A')
+            assignment_group = get_display_value(incident_data, 'assignment_group')
+            caller = get_display_value(incident_data, 'caller_id')
+            formatted_result = (f"Incident Details for {incident_data.get('number', 'N/A')}:\n"
+                                f"- Short Description: {incident_data.get('short_description', 'N/A')}\n"
+                                f"- State: {state_value}\n"
+                                f"- Assignment Group: {assignment_group}\n"
+                                f"- Caller: {caller}\n"
+                                f"- Full Description: {incident_data.get('description', 'N/A')}")
+            return formatted_result
+        except Exception as e: return f"An unexpected error occurred: {e}"
+    def _arun(self, incident_number: str): raise NotImplementedError()
+
+class SearchIncidentsInput(BaseModel):
+    search_term: str = Field(description="Keyword or phrase to search for in incident short descriptions.")
+class SearchIncidentsTool(BaseTool):
+    name: str = "search_incidents"
+    description: str = "Use this tool to search for incidents by a keyword. Returns a list of matching incidents."
+    args_schema: Type[BaseModel] = SearchIncidentsInput
+    def _run(self, search_term: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        url = f"{instance}/api/now/table/incident"
+        params = {"sysparm_query": f"short_descriptionLIKE{search_term}", "sysparm_limit": "5", "sysparm_fields": "number,short_description"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return f"No incidents found matching '{search_term}'."
+            formatted_results = ["Found incidents:"]
+            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')}")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred during search: {e}"
+    def _arun(self, search_term: str): raise NotImplementedError()
+
+class CreateIncidentInput(BaseModel):
+    short_description: str = Field(description="A brief summary of the issue for the new incident.")
+class CreateIncidentTool(BaseTool):
+    name: str = "create_incident"
+    description: str = "Use this tool to create a new incident ticket. Provide a short description of the problem."
+    args_schema: Type[BaseModel] = CreateIncidentInput
+    def _run(self, short_description: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        caller_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", "Abel Tuter")
+        if not caller_sys_id: return "Could not find the default caller 'Abel Tuter' to create the incident."
+        url = f"{instance}/api/now/table/incident"
+        payload = {"short_description": short_description, "caller_id": caller_sys_id, "urgency": "3", "impact": "3"}
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        try:
+            response = requests.post(url, auth=(user, pwd), headers=headers, json=payload)
+            response.raise_for_status()
+            new_incident_number = response.json().get("result", {}).get("number", "UNKNOWN")
+            return f"Successfully created new incident: {new_incident_number}."
+        except Exception as e: return f"An error occurred while creating the incident: {e}"
+    def _arun(self, short_description: str): raise NotImplementedError()
+
+class UpdateIncidentInput(BaseModel):
+    incident_number: str = Field(description="The incident number to update, e.g., 'INC0010001'.")
+    work_note: str = Field(description="The comment or work note to add to the incident.")
+class UpdateIncidentTool(BaseTool):
+    name: str = "update_incident"
+    description: str = "Use this tool to add a work note or comment to an existing incident."
+    args_schema: Type[BaseModel] = UpdateIncidentInput
+    def _run(self, incident_number: str, work_note: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        incident_sys_id = get_sys_id(instance, user, pwd, "incident", "number", incident_number)
+        if not incident_sys_id: return f"Could not find incident {incident_number} to update."
+        url = f"{instance}/api/now/table/incident/{incident_sys_id}"
+        payload = {"work_notes": work_note}
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        try:
+            response = requests.patch(url, auth=(user, pwd), headers=headers, json=payload)
+            response.raise_for_status()
+            return f"Successfully added note to incident {incident_number}."
+        except Exception as e: return f"An error occurred while updating the incident: {e}"
+    def _arun(self, incident_number: str, work_note: str): raise NotImplementedError()
+
+class ListOpenIncidentsForUserInput(BaseModel):
+    user_name: str = Field(description="The full name of the user, e.g., 'Beth Anglin'.")
+class ListOpenIncidentsForUserTool(BaseTool):
+    name: str = "list_open_incidents_for_user"
+    description: str = "Use this tool to list all open incidents for a specific user."
+    args_schema: Type[BaseModel] = ListOpenIncidentsForUserInput
+    def _run(self, user_name: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        caller_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", user_name)
+        if not caller_sys_id: return f"Could not find a user named '{user_name}'."
+        url = f"{instance}/api/now/table/incident"
+        params = {"sysparm_query": f"caller_id={caller_sys_id}^active=true", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return f"No open incidents found for {user_name}."
+            formatted_results = [f"Open incidents for {user_name}:"]
+            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred: {e}"
+    def _arun(self, user_name: str): raise NotImplementedError()
+
+# --- NEW TOOL: List Incidents Assigned to User ---
+class ListIncidentsAssignedToUserInput(BaseModel):
+    user_name: str = Field(description="The full name of the user, e.g., 'David Loo'.")
+
+class ListIncidentsAssignedToUserTool(BaseTool):
+    name: str = "list_incidents_assigned_to_user"
+    description: str = "Use this tool to find all incidents (open or closed) assigned to a specific user."
+    args_schema: Type[BaseModel] = ListIncidentsAssignedToUserInput
+
+    def _run(self, user_name: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        assignee_sys_id = get_sys_id(instance, user, pwd, "sys_user", "name", user_name)
+        if not assignee_sys_id: return f"Could not find a user named '{user_name}' to check assignments."
+        url = f"{instance}/api/now/table/incident"
+        # This query checks the 'assigned_to' field and does NOT filter by active=true
+        params = {"sysparm_query": f"assigned_to={assignee_sys_id}", "sysparm_limit": "10", "sysparm_fields": "number,short_description,state"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return f"No incidents are currently assigned to {user_name}."
+            formatted_results = [f"Incidents assigned to {user_name}:"]
+            for item in results: formatted_results.append(f"- {item.get('number')}: {item.get('short_description')} (State: {item.get('state')})")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred: {e}"
+    def _arun(self, user_name: str): raise NotImplementedError()
+
+
+class SearchKnowledgeBaseInput(BaseModel):
+    search_term: str = Field(description="The topic or question to search for in the knowledge base.")
+class SearchKnowledgeBaseTool(BaseTool):
+    name: str = "search_knowledge_base"
+    description: str = "Use this tool to search for helpful articles in the ServiceNow knowledge base."
+    args_schema: Type[BaseModel] = SearchKnowledgeBaseInput
+    def _run(self, search_term: str):
+        instance, user, pwd = get_servicenow_credentials()
+        if not instance: return "ServiceNow credentials not configured."
+        url = f"{instance}/api/now/table/kb_knowledge"
+        params = {"sysparm_query": f"short_descriptionLIKE{search_term}", "sysparm_limit": "3", "sysparm_fields": "number,short_description,article_body"}
+        headers = {"Accept": "application/json"}
+        try:
+            response = requests.get(url, auth=(user, pwd), headers=headers, params=params)
+            response.raise_for_status()
+            results = response.json().get("result", [])
+            if not results: return f"No knowledge base articles found matching '{search_term}'."
+            formatted_results = ["Found knowledge base articles:"]
+            for item in results:
+                body = item.get('article_body', 'No content.')
+                clean_body = requests.utils.unquote(body).replace('</p>', '\n').replace('<p>', '').replace('<strong>', '').replace('</strong>', '')
+                formatted_results.append(f"- {item.get('number')}: {item.get('short_description')}\n  Summary: {clean_body[:200]}...")
+            return "\n".join(formatted_results)
+        except Exception as e: return f"An error occurred while searching the knowledge base: {e}"
+    def _arun(self, search_term: str): raise NotImplementedError()
+
+# --- 4. LangChain Agent Setup ---
+llm = AzureChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME"),
+    openai_api_version="2023-05-15",
+)
+tools = [
+    GetIncidentTool(), SearchIncidentsTool(), CreateIncidentTool(), UpdateIncidentTool(),
+    ListOpenIncidentsForUserTool(), SearchKnowledgeBaseTool(),
+]
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful ServiceNow assistant. You have access to tools for incidents and the knowledge base. Always be friendly and conversational."),
+    MessagesPlaceholder(variable_name="chat_history", optional=True),
+    ("human", "{input}"),
+    MessagesPlaceholder(variable_name="agent_scratchpad"),
+])
+agent = create_openai_tools_agent(llm, tools, prompt)
+
+# --- ADDED: In-memory store for conversation histories ---
+chat_histories = {}
+
+# We now pass the memory object directly to the AgentExecutor
+agent_executor = AgentExecutor(
+    agent=agent, 
+    tools=tools, 
+    verbose=True,
+    handle_parsing_errors=True
+)
+
+# --- 5. FastAPI App and Endpoint ---
+app = FastAPI(
+    title="ServiceNow Chatbot API",
+    description="An API for interacting with a multi-tool ServiceNow agent with memory.",
+    version="2.1.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = "default-session" # Add a session_id to the request
+
+@app.post("/chat")
+def handle_chat_request(request: ChatRequest):
+    session_id = request.session_id
+
+    # --- ADDED: Get or create a memory object for the session ---
+    if session_id not in chat_histories:
+        chat_histories[session_id] = ConversationBufferWindowMemory(
+            k=10, # Remember the last 10 exchanges
+            memory_key="chat_history",
+            return_messages=True
+        )
+    
+    memory = chat_histories[session_id]
+
+    # Load the history for the current session
+    chat_history = memory.load_memory_variables({})['chat_history']
+
+    print(f"Received message: '{request.message}' for session: {session_id}")
+    
+    # --- MODIFIED: Pass the chat_history to the agent ---
+    response = agent_executor.invoke({
+        "input": request.message,
+        "chat_history": chat_history
+    })
+
+    # --- ADDED: Save the new interaction into the session's memory ---
+    memory.save_context(
+        {"input": request.message},
+        {"output": response['output']}
+    )
+    
+    print(f"Agent output: {response['output']}")
+    return {"reply": response['output']}
+
+@app.get("/")
+def read_root():
+    return {"status": "ServiceNow Chatbot API is running"}
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

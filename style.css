@@ -1,0 +1,59 @@
+body {
+    font-family: 'Inter', sans-serif;
+}
+
+/* Custom scrollbar styling for a cleaner look */
+.custom-scrollbar::-webkit-scrollbar {
+    width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+    background: #e5e7eb;
+    border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+    background: #9ca3af;
+    border-radius: 10px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #6b7280;
+}
+
+/* Typing animation for the bot */
+.typing-dots {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 1.2rem;
+}
+
+.typing-dots span {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background-color: #9ca3af;
+    border-radius: 50%;
+    margin: 0 2px;
+    animation: typing 1.5s infinite ease-in-out;
+}
+
+.typing-dots span:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.typing-dots span:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+@keyframes typing {
+    0%, 80%, 100% {
+        transform: scale(0.8);
+        opacity: 0.7;
+    }
+    40% {
+        transform: scale(1.2);
+        opacity: 1;
+    }
+}
