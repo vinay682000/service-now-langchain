@@ -3,7 +3,7 @@
 set -o errexit
 
 # Install backend dependencies
-pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cpu
+pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Navigate into the frontend directory
 cd frontend
