@@ -1,0 +1,28 @@
+# .dockerignore
+.venv
+.git
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+.env
+.env.production
+
+# Ignore your rough work files you listed
+tools.py
+index.html
+style.css
+previous version/
+notes.txt
+hello.py
+azureopenAI.txt
+script.js
+
+# Ignore the frontend source code (we'll build it separately)
+frontend
+
+
+!main.py
+!requirements.txt
+!Dockerfile

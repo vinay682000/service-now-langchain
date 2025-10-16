@@ -1,6 +1,7 @@
 // frontend/src/api.js
-const BACKEND_URL = "http://127.0.0.1:8000";
-
+//const BACKEND_URL = "http://127.0.0.1:8000";
+const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || "http://127.0.0.1:8000";
+console.log("Backend URL is set to:", BACKEND_URL)
 const getOrCreateSessionId = () => {
     let sessionId = localStorage.getItem('chatSessionId');
     if (!sessionId) {

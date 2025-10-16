@@ -1,10 +1,12 @@
 pip install langchain-nvidia-ai-endpoints
 pip install -r requirements.txt
 
+python -m uvicorn main:app --reload
 
 source .venv/bin/activate
-python -m uvicorn main:app --reload
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+source .venv/bin/activate
 cd frontend
 npm run dev
 
@@ -18,6 +20,21 @@ npm install
 npm run build
 
 pip install langchain requests uvicorn dotenv fastapi langchain_nvidia_ai_endpoints
+
+docker-compose up --build
+docker compose up
+http://localhost:3000/
+
+pip install pipreqs = to install pipreqs
+pipreqs . --force   = use pipreqs instead of pip freeze so that only include your direct, top-level dependencies and avoids including all the sub-dependencies.
+
+#how to tag and push the docker images to my dockerhub
+docker tag service-now-langchain-backend narnevinaykrishn/backend:latest
+docker tag service-now-langchain-frontend narnevinaykrishn/frontend:latest
+docker login
+docker push narnevinaykrishn/backend:latest
+docker push narnevinaykrishn/frontend:latest
+
 
 Of course. Here is a comprehensive list of prompts designed to test the full range of our agent's capabilities, from simple commands to complex, multi-step conversations.
 
